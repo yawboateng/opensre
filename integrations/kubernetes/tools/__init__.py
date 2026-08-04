@@ -91,9 +91,12 @@ def _clusters_list(sources: dict[str, Any]) -> list[dict[str, Any]]:
 def _base_params(sources: dict[str, Any]) -> dict[str, Any]:
     """Injected default connection fields plus the map of every registered cluster.
 
-    ``cluster_configs`` is a passthrough (never listed in ``injected_params``,
-    so it is not protected and the model never sends it): ``run`` uses it to
-    resolve an LLM-chosen ``cluster`` name to that instance's connection fields.
+    ``cluster_configs`` is trusted connection configuration, so every tool lists
+    it in ``injected_params``: the runtime re-forces the extracted value over
+    anything the model sends, exactly as it protects ``kubeconfig`` and
+    ``context``. ``run`` uses it to resolve an LLM-chosen ``cluster`` name to
+    that instance's connection fields — the model picks the *name*, never the
+    connection map.
     """
     k8s = sources.get("kubernetes", {})
     return {
@@ -175,7 +178,7 @@ class KubernetesListPodsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = ["kubeconfig"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -270,7 +273,7 @@ class KubernetesGetPodLogsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = ["pod_name"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -374,7 +377,7 @@ class KubernetesListDeploymentsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -460,7 +463,7 @@ class KubernetesGetEventsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -565,7 +568,7 @@ class KubernetesDescribePodTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = ["pod_name"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -643,7 +646,7 @@ class KubernetesListNodesTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -735,7 +738,7 @@ class KubernetesListServicesTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -825,7 +828,7 @@ class KubernetesListStatefulSetsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -910,7 +913,7 @@ class KubernetesListDaemonSetsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -994,7 +997,7 @@ class KubernetesListIngressesTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -1077,7 +1080,7 @@ class KubernetesListConfigMapsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {
@@ -1174,7 +1177,7 @@ class KubernetesGetResourceTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = ["resource_type", "name"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace"]
+    injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
         "type": "object",
         "properties": {

@@ -895,10 +895,79 @@ _MULTI_CLUSTER_SOURCES = {
 def test_extract_params_includes_cluster_configs() -> None:
     tool = KubernetesListPodsTool()
     params = tool.extract_params(_MULTI_CLUSTER_SOURCES)
-    # cluster_configs must be a passthrough, never a protected injected param.
-    assert "cluster_configs" not in tool.injected_params
+    # cluster_configs is trusted connection configuration: it MUST be a protected
+    # injected param so the runtime re-forces it over any model-supplied value.
+    assert "cluster_configs" in tool.injected_params
     assert sorted(params["cluster_configs"]) == ["gke-dev", "gke-prod"]
     assert params["cluster_configs"]["gke-prod"]["kubeconfig_path"] == "/p/prod"
+
+
+def test_cluster_configs_is_protected_on_every_connection_tool() -> None:
+    # Every tool that builds a client from cluster_configs must protect it.
+    connection_tools = [
+        KubernetesListPodsTool(),
+        KubernetesGetPodLogsTool(),
+        KubernetesListDeploymentsTool(),
+        KubernetesGetEventsTool(),
+        KubernetesDescribePodTool(),
+        KubernetesListNodesTool(),
+        KubernetesListServicesTool(),
+        KubernetesListStatefulSetsTool(),
+        KubernetesListDaemonSetsTool(),
+        KubernetesListIngressesTool(),
+        KubernetesListConfigMapsTool(),
+        KubernetesGetResourceTool(),
+    ]
+    for tool in connection_tools:
+        assert "cluster_configs" in tool.injected_params, tool.name
+
+
+def test_model_cannot_override_cluster_configs_via_tool_input() -> None:
+    """A model-supplied cluster_configs must never replace the trusted map.
+
+    Exercises the real runtime merge (core.execution): because cluster_configs
+    is a protected injected param, the extracted (store-derived) map wins, so
+    the client is built from the registered cluster's connection fields, not
+    the model's.
+    """
+    from core.execution import execute_tool_calls
+    from core.llm.types import ToolCall
+    from core.tool_framework.registered_tool import RegisteredTool
+
+    mock_pod_list = MagicMock()
+    mock_pod_list.items = []
+    mock_core = MagicMock()
+    mock_core.list_namespaced_pod.return_value = mock_pod_list
+
+    resolved = {
+        "kubernetes": {"kubeconfig": "kc-dev", "context": "ctx-dev", "namespace": "dev"},
+        "_all_kubernetes_instances": [
+            {"name": "gke-dev", "tags": {}, "config": {"kubeconfig": "kc-dev"}},
+            {
+                "name": "gke-prod",
+                "tags": {},
+                "config": {"kubeconfig_path": "/trusted/prod", "namespace": "prod"},
+            },
+        ],
+    }
+    malicious_input = {
+        "cluster": "gke-prod",
+        "cluster_configs": {"gke-prod": {"kubeconfig_path": "/attacker/controlled"}},
+    }
+
+    with patch(
+        "integrations.kubernetes.tools._make_client",
+        return_value=_make_client_with_core(mock_core),
+    ) as mock_make:
+        execute_tool_calls(
+            [ToolCall(id="c1", name="kubernetes_list_pods", input=malicious_input)],
+            [RegisteredTool.from_base_tool(KubernetesListPodsTool())],
+            resolved,
+        )
+
+    built_from = mock_make.call_args.args[0]["kubernetes"]
+    assert built_from["kubeconfig_path"] == "/trusted/prod"
+    assert built_from["kubeconfig_path"] != "/attacker/controlled"
 
 
 def test_run_targets_named_cluster() -> None:
