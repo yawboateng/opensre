@@ -1,0 +1,72 @@
+# Production override example for the OpenSRE chart.
+#
+# Contains NO secrets — this file is safe to commit to your GitOps repo.
+# All credentials come from an externally managed Secret (external-secrets /
+# sealed-secrets), and external managed Postgres/Redis connection strings live
+# in that same Secret so passwords never land in git.
+#
+# Usage:
+#   helm upgrade --install opensre deploy/helm/opensre \
+#     -n opensre --create-namespace -f deploy/helm/opensre/values-prod.yaml
+
+image:
+  repository: <registry>/opensre
+  # Pin an immutable tag or digest in production.
+  tag: "0.1"
+  pullPolicy: IfNotPresent
+
+config:
+  llmProvider: anthropic
+  extraEnv:
+    OPENSRE_DEPLOYMENT_METHOD: kubernetes
+
+# Credentials managed out-of-band. The referenced Secret must contain the LLM
+# API key (e.g. ANTHROPIC_API_KEY), KUBECONFIG_CONTENT for target clusters,
+# DATABASE_URI, REDIS_URI, and any integration credentials.
+secret:
+  create: false
+  existingSecret: opensre-credentials
+
+# External managed datastores. Leave the URIs blank here and provide
+# DATABASE_URI / REDIS_URI via the Secret above (they contain passwords).
+postgresql:
+  bundled: false
+  uri: ""
+redis:
+  bundled: false
+  uri: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # GKE Workload Identity:
+  #   iam.gke.io/gcp-service-account: opensre@PROJECT.iam.gserviceaccount.com
+  # AWS IRSA:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/opensre
+
+# HTTP investigator: scale horizontally on load.
+web:
+  enabled: true
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Slack/Telegram + scheduler: exactly one replica (Socket Mode is single-consumer).
+gateway:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

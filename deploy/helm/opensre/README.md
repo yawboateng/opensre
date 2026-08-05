@@ -67,20 +67,24 @@ redis:      { bundled: true }
 
 Precedence per backend: explicit `uri` > `bundled` > whatever is in the Secret.
 
-## GitOps (Argo CD example)
+## GitOps (Argo CD)
 
-Point an `Application` at this chart path in your fork and let Argo reconcile:
+Two ready-to-edit files ship with the chart:
 
-```yaml
-source:
-  repoURL: https://github.com/<you>/opensre
-  path: deploy/helm/opensre
-  targetRevision: main
-  helm:
-    valueFiles: [values-prod.yaml]   # your non-secret overrides
+- [`values-prod.yaml`](values-prod.yaml) — a secret-free production overrides
+  file (existing Secret, external managed Postgres/Redis via the Secret, HPA,
+  resource requests/limits). Safe to commit.
+- [`../../argocd/opensre-application.yaml`](../../argocd/opensre-application.yaml)
+  — an Argo CD `Application` that points at `deploy/helm/opensre` with
+  `values-prod.yaml`, auto-sync + prune + self-heal.
+
+```bash
+# Edit repoURL (<you>) and image.repository, then:
+kubectl apply -f deploy/argocd/opensre-application.yaml
 ```
 
-Keep credentials out of `values-prod.yaml`; use `existingSecret`.
+Keep credentials out of `values-prod.yaml`; supply them through the
+`existingSecret` (external-secrets / sealed-secrets).
 
 ## Common values
 
