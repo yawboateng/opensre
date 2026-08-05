@@ -1,0 +1,34 @@
+OpenSRE installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.web.enabled }}
+
+web (HTTP API):
+  Service: {{ include "opensre.fullname" . }}-web:{{ .Values.web.service.port }} ({{ .Values.web.service.type }})
+  Health : kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "opensre.fullname" . }}-web {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
+           curl http://localhost:{{ .Values.web.service.port }}/health
+  Endpoints: GET /health  POST /alerts  POST /investigate
+{{- end }}
+
+{{- if .Values.gateway.enabled }}
+
+gateway (Slack/Telegram + scheduler):
+  Single replica (Slack Socket Mode is single-consumer). Outbound-only; no Service.
+  Logs: kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "opensre.fullname" . }}-gateway -f
+{{- end }}
+
+{{- if and .Values.secret.create (not .Values.secret.existingSecret) }}
+
+WARNING: this release rendered a Secret from values (secret.create=true). Do NOT
+commit real credentials in a values file tracked by git. For production, set
+secret.existingSecret to a Secret you manage (external-secrets / sealed-secrets)
+and secret.create=false.
+{{- end }}
+
+{{- if not (default .Chart.AppVersion .Values.image.tag) }}
+{{- end }}
+Image: {{ include "opensre.image" . }}
+{{- if or .Values.postgresql.bundled .Values.redis.bundled }}
+
+Bundled datastore(s) enabled — single-replica, not HA. Use external managed
+Postgres/Redis (postgresql.uri / redis.uri) for production.
+{{- end }}
