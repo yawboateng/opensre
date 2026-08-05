@@ -1658,27 +1658,35 @@ def load_env_integrations() -> list[dict[str, Any]]:
         except Exception as exc:
             _report_env_loader_failure(exc, integration="alertmanager")
 
-    _kubeconfig_path = os.getenv(KUBECONFIG_PATH_ENV, "").strip()
-    _kubeconfig_content = resolve_env_credential(KUBECONFIG_CONTENT_ENV)
-    if _kubeconfig_path or _kubeconfig_content:
-        try:
-            kubernetes_config = KubernetesIntegrationConfig.model_validate(
-                {
-                    "kubeconfig_path": _kubeconfig_path,
-                    "kubeconfig": _kubeconfig_content,
-                    "context": os.getenv(KUBECONFIG_CONTEXT_ENV, "").strip(),
-                    "namespace": os.getenv(KUBECONFIG_NAMESPACE_ENV, "default").strip()
-                    or "default",
-                }
-            )
-            integrations.append(
-                _active_env_record(
-                    "kubernetes",
-                    kubernetes_config.model_dump(exclude={"integration_id"}),
+    # KUBERNETES_INSTANCES (JSON array) registers multiple named clusters in one
+    # env var — the durable, GitOps-friendly way to run multi-cluster in a pod,
+    # where the on-disk store is ephemeral. Falls back to the single-instance
+    # KUBECONFIG_* vars when unset. Mirrors GRAFANA_INSTANCES / ARGOCD_INSTANCES.
+    kubernetes_multi = _parse_instances_env("KUBERNETES_INSTANCES", "kubernetes")
+    if kubernetes_multi is not None:
+        integrations.append(kubernetes_multi)
+    else:
+        _kubeconfig_path = os.getenv(KUBECONFIG_PATH_ENV, "").strip()
+        _kubeconfig_content = resolve_env_credential(KUBECONFIG_CONTENT_ENV)
+        if _kubeconfig_path or _kubeconfig_content:
+            try:
+                kubernetes_config = KubernetesIntegrationConfig.model_validate(
+                    {
+                        "kubeconfig_path": _kubeconfig_path,
+                        "kubeconfig": _kubeconfig_content,
+                        "context": os.getenv(KUBECONFIG_CONTEXT_ENV, "").strip(),
+                        "namespace": os.getenv(KUBECONFIG_NAMESPACE_ENV, "default").strip()
+                        or "default",
+                    }
                 )
-            )
-        except Exception as exc:
-            _report_env_loader_failure(exc, integration="kubernetes")
+                integrations.append(
+                    _active_env_record(
+                        "kubernetes",
+                        kubernetes_config.model_dump(exclude={"integration_id"}),
+                    )
+                )
+            except Exception as exc:
+                _report_env_loader_failure(exc, integration="kubernetes")
 
     victoria_logs_url = os.getenv("VICTORIA_LOGS_URL", "").strip().rstrip("/")
     if victoria_logs_url:

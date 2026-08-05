@@ -93,9 +93,29 @@ opensre integrations remove-cluster gke-prod
 repeatable; `--no-verify` skips the connectivity probe. Re-running
 `add-cluster` with an existing name updates that cluster in place.
 
+### Declaring clusters via env (containers / GitOps)
+
+`add-cluster` writes to the local store (`~/.opensre/integrations.json`), which
+is ephemeral inside a container and not shared across replicas. For a
+containerized or GitOps deployment, declare every cluster in one env var
+instead — `KUBERNETES_INSTANCES`, a JSON array read by each pod at startup:
+
+```bash
+KUBERNETES_INSTANCES='[
+  {"name":"gke-dev","tags":{"env":"dev"},"credentials":{"kubeconfig_path":"/etc/kube/dev","context":"gke_dev","namespace":"default"}},
+  {"name":"gke-prod","tags":{"env":"prod"},"credentials":{"kubeconfig":"<inline kubeconfig YAML>","context":"gke_prod","namespace":"default"}}
+]'
+```
+
+Each entry takes `name`, optional `tags`, and `credentials` (`kubeconfig` inline
+YAML **or** `kubeconfig_path`, plus optional `context`/`namespace`). When set it
+supersedes the single-cluster `KUBECONFIG*` vars; leave it unset to use those.
+It contains credentials, so treat it as a secret (in the Helm chart, put it in
+the Secret).
+
 A single cluster still works with no changes — `opensre integrations setup
 kubernetes` and the environment variables above register the default cluster;
-`add-cluster` registers additional ones on top of it.
+`add-cluster` (or `KUBERNETES_INSTANCES`) registers additional ones on top of it.
 
 Every `kubernetes_*` tool takes an optional `cluster` argument. Omit it to use
 the default cluster; pass a registered name to target that cluster:
