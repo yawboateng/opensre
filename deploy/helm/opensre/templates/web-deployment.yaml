@@ -51,6 +51,9 @@ spec:
             - secretRef:
                 name: {{ include "opensre.secretName" . }}
           {{- if .Values.web.probes.enabled }}
+          # /healthz is always-200 process liveness. /readyz is only ever marked
+          # ready by the gateway daemon (gateway/runtime/manager.py), so in web
+          # mode readiness uses /health, which reflects real app health.
           livenessProbe:
             httpGet:
               path: /healthz
@@ -59,7 +62,7 @@ spec:
             periodSeconds: 15
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /health
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
