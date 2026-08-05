@@ -1,0 +1,35 @@
+# Argo CD Application for OpenSRE.
+#
+# Deploys the chart at deploy/helm/opensre from your fork, using the committed
+# values-prod.yaml (no secrets). Credentials are supplied separately via the
+# `opensre-credentials` Secret referenced by values-prod.yaml (managed with
+# external-secrets / sealed-secrets).
+#
+# Replace <you> with your GitHub org/user, then:
+#   kubectl apply -f deploy/argocd/opensre-application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: opensre
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/<you>/opensre
+    targetRevision: main
+    path: deploy/helm/opensre
+    helm:
+      # Relative to the source `path` above.
+      valueFiles:
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: opensre
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

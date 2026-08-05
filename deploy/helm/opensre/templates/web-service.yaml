@@ -1,0 +1,23 @@
+{{- if .Values.web.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opensre.fullname" . }}-web
+  labels:
+    {{- include "opensre.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  {{- with .Values.web.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.web.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.web.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "opensre.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+{{- end }}

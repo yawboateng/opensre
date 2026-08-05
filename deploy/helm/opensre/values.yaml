@@ -1,0 +1,147 @@
+# Default values for the OpenSRE chart.
+# Two workloads share one image:
+#   web      — HTTP API (health, POST /alerts, POST /investigate). Deployment + Service.
+#   gateway  — Slack/Telegram + scheduler. Single replica, no Service (outbound long-poll).
+
+image:
+  repository: opensre
+  # Defaults to Chart.appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Shared application config (non-secret). Rendered as plain env on both pods.
+# ---------------------------------------------------------------------------
+config:
+  # LLM provider; the matching API key belongs in `secret.data` (see below).
+  llmProvider: anthropic
+  # Extra non-secret env vars applied to both workloads, e.g.:
+  #   OPENSRE_DEPLOYMENT_METHOD: kubernetes
+  extraEnv: {}
+
+# ---------------------------------------------------------------------------
+# Secrets — the LLM API key, kubeconfig(s), and integration credentials.
+#
+# `create: true` renders a Secret from `data` below (plain key/value; Helm
+# base64-encodes it). WARNING: do NOT commit real values into a values file
+# that lives in git. For production, either:
+#   - set `existingSecret` to a Secret you manage out-of-band, or
+#   - use an external-secrets / sealed-secrets operator,
+# and leave `create: false`.
+# ---------------------------------------------------------------------------
+secret:
+  create: true
+  # When set, the chart renders NO Secret and both pods `envFrom` this name.
+  existingSecret: ""
+  # Plain key/value pairs -> Secret data (only used when create=true and no existingSecret).
+  data:
+    ANTHROPIC_API_KEY: ""
+    # KUBECONFIG_CONTENT: ""          # inline kubeconfig for the target cluster(s)
+    # DATADOG_API_KEY: ""             # any integration credentials
+    # DATABASE_URI / REDIS_URI may also be placed here instead of the blocks below.
+
+# ---------------------------------------------------------------------------
+# Persistence — supports BOTH external managed URIs and bundled in-chart pods.
+# Precedence per backend: explicit `uri` > `bundled` service > (whatever is in
+# the Secret). Bundled pods are single-replica conveniences (no HA/backups) —
+# prefer external managed Postgres/Redis for production.
+# ---------------------------------------------------------------------------
+postgresql:
+  # Set to point at an existing managed Postgres. Leave bundled=false.
+  uri: "" # e.g. postgresql://user:pass@host:5432/opensre
+  # Deploy a minimal in-cluster Postgres and wire DATABASE_URI to it.
+  bundled: false
+  image: postgres:16-alpine
+  auth:
+    username: opensre
+    password: opensre
+    database: opensre
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClassName: ""
+  resources: {}
+
+redis:
+  uri: "" # e.g. redis://host:6379/0
+  bundled: false
+  image: redis:7-alpine
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""
+  resources: {}
+
+# ---------------------------------------------------------------------------
+# ServiceAccount — mainly for cloud IAM (GKE Workload Identity / AWS IRSA) used
+# by cloud integrations. NOTE: OpenSRE's Kubernetes tools authenticate with a
+# kubeconfig (from the Secret), not the in-cluster token, so this SA is not the
+# cluster investigation credential by itself.
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # e.g. iam.gke.io/gcp-service-account: opensre@project.iam.gserviceaccount.com
+  #      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/opensre
+
+# Optional read-only RBAC. Only useful if you generate a kubeconfig from this
+# ServiceAccount so OpenSRE can investigate the cluster it runs in. Off by
+# default (investigation creds normally arrive via kubeconfig in the Secret).
+rbac:
+  create: false
+  # true renders a ClusterRole (adds nodes + all namespaces); false a namespaced Role.
+  clusterRead: false
+
+# ---------------------------------------------------------------------------
+# web workload — HTTP investigator.
+# ---------------------------------------------------------------------------
+web:
+  enabled: true
+  replicaCount: 1
+  containerPort: 8000
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations: {}
+  # Alert-intake / investigate routes are gated by this bearer token (env
+  # OPENSRE_ALERT_LISTENER_TOKEN). Put the value in the Secret; set this to the
+  # key name it lives under to reference it, or leave blank to disable auth.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+  resources: {}
+  probes:
+    enabled: true
+  extraEnv: {}
+
+# ---------------------------------------------------------------------------
+# gateway workload — Slack/Telegram + scheduler. Fixed to ONE replica: Slack
+# Socket Mode is single-consumer, so a second replica would split events.
+# ---------------------------------------------------------------------------
+gateway:
+  enabled: true
+  resources: {}
+  extraEnv: {}
+
+# Applied to all OpenSRE pods.
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+nodeSelector: {}
+tolerations: []
+affinity: {}
