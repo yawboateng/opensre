@@ -22,7 +22,9 @@ export GRAFANA_INSTANCES='[
 ]'
 ```
 
-Supported env vars: `GRAFANA_INSTANCES`, `DD_INSTANCES`, `HONEYCOMB_INSTANCES`, `CORALOGIX_INSTANCES`, `AWS_INSTANCES`, `ARGOCD_INSTANCES`.
+Supported env vars: `GRAFANA_INSTANCES`, `DD_INSTANCES`, `GROUNDCOVER_INSTANCES`, `HONEYCOMB_INSTANCES`, `CORALOGIX_INSTANCES`, `AWS_INSTANCES`, `ARGOCD_INSTANCES`, `SPLUNK_INSTANCES`, `KUBERNETES_INSTANCES`.
+
+For Kubernetes each entry's `credentials` holds `kubeconfig` (inline YAML) or `kubeconfig_path`, plus optional `context` and `namespace` — one entry per cluster (e.g. a GKE cluster per GCP project).
 
 When `<SERVICE>_INSTANCES` is set, the legacy single-instance vars for that service (e.g. `GRAFANA_INSTANCE_URL`, `GRAFANA_READ_TOKEN`) are ignored. If the JSON is invalid the loader logs a warning and falls back to the legacy vars.
 
@@ -64,6 +66,10 @@ Alerts can carry a `grafana_instance` hint — either at the top level of the ra
 ```
 
 When set, OpenSRE selects the matching instance. If the hint is absent or unknown, the default (first) instance is used.
+
+### By tool argument (Kubernetes)
+
+Every `kubernetes_*` tool takes an optional `cluster` argument naming a registered instance. The agent discovers the names with `kubernetes_list_clusters`, then passes `cluster="gke-prod"` to any tool to target that cluster; omitting it uses the default (first) one. Unlike the Grafana alert-hint path, selection happens per tool call during the investigation, so one investigation can span several clusters. See [Kubernetes](kubernetes).
 
 ### Programmatic selectors
 
@@ -107,13 +113,14 @@ picked = select_instance(resolved_integrations, "grafana", tags={"env": "staging
 | Honeycomb | ✅ | ✅ | Default instance only |
 | Coralogix | ✅ | ✅ | Default instance only |
 | Argo CD | ✅ | ✅ | Default instance only |
+| Kubernetes | ✅ | ✅ | ✅ (per-tool `cluster` arg + `kubernetes_list_clusters`) |
 | Others | — | Default instance only | Default instance only |
 
 Providers without end-to-end selection fall back to the default (first) instance — identical behavior to before this feature.
 
 ## Known limitations
 
-- Only Grafana honors an alert-provided `grafana_instance` hint in this release; extending per-provider selection is a follow-up.
-- Operators must configure multi-instance via env vars or direct JSON edit; the CLI wizard is not yet instance-aware.
+- Alert-hint selection (`grafana_instance`) is Grafana-only; Kubernetes instead selects per tool call via the `cluster` argument. Extending alert-hint selection to other providers is a follow-up.
+- Multi-instance is configured via env vars or direct JSON edit for most providers. Kubernetes additionally has an instance-aware CLI (`opensre integrations add-cluster` / `list-clusters` / `remove-cluster`); the setup wizard for other providers is not yet instance-aware.
 - `verify_integrations` currently validates only the default instance of a multi-instance record.
 - When both the store and env vars configure the same service, the store still wins (existing precedence). To use multi-instance env vars, either remove the store entry for that service or add instances via the store directly.
