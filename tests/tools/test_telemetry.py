@@ -1563,6 +1563,10 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "memory_forget",
         "memory_recall",
         "memory_remember",
+        # open_github_pull_request catches only GitHubWriteError for known
+        # states (bad branch name, branch exists, GitHub rejected the write);
+        # unexpected errors escape to the global #1476 wrapper.
+        "open_github_pull_request",
         "opsgenie_alert_detail",
         "opsgenie_alerts",
         "pagerduty_incident_detail",
