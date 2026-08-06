@@ -276,8 +276,10 @@ gcloud components install gke-gcloud-auth-plugin
 
 The generated kubeconfig **stores no credentials**. It holds the cluster endpoint, the cluster's public CA certificate, and an instruction to ask the plugin for a token at connection time.
 
+The kubeconfig tells the plugin to use Application Default Credentials — the same credentials the GCP tools use — and forwards `GCP_IMPERSONATE_SERVICE_ACCOUNT` when it is set, so discovery and connection present one identity. On GKE with Workload Identity that needs no setup at all.
+
 <Warning>
-The plugin authenticates as *its own* Application Default Credentials — on a workstation, whoever ran `gcloud auth login`, which is not necessarily the identity OpenSRE used to find the cluster. When `GCP_SERVICE_ACCOUNT_KEY` is a **file path**, the generated kubeconfig pins the plugin to that same file, so both sides match. When it is inline JSON there is nothing to pin, so set `GOOGLE_APPLICATION_CREDENTIALS` yourself.
+When `GCP_SERVICE_ACCOUNT_KEY` is a **file path**, the generated kubeconfig pins the plugin to that same file. When it is inline JSON there is nothing to pin, so set `GOOGLE_APPLICATION_CREDENTIALS` yourself — otherwise the plugin falls back to whatever ADC it finds. On a workstation that means running `gcloud auth application-default login`; `gcloud auth login` alone is not enough.
 </Warning>
 
 | Option | What it does |
@@ -352,6 +354,7 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | **A GKE cluster is listed but has no `registered_as`** | No kubeconfig is registered for it, so the `kubernetes_*` tools cannot reach it. Run `opensre integrations add-gke-clusters --project '*'`, or investigate it through Cloud Logging and Monitoring. |
 | **`add-gke-clusters` says the plugin is not on PATH** | Install it with `gcloud components install gke-gcloud-auth-plugin`. Without it the generated kubeconfig cannot obtain a token, so the command refuses to write one. The container image already includes the plugin, so seeing this in a pod means the image predates that change. |
 | **`add-gke-clusters` registers a cluster but `kubernetes_*` calls fail to authenticate** | The auth plugin is resolving different credentials than OpenSRE. Point `GOOGLE_APPLICATION_CREDENTIALS` at the same service-account key, or run `gcloud auth application-default login`. |
+| **403 `pods is forbidden: User "system:anonymous"`** | The plugin returned no token, so the request went out unauthenticated. Application Default Credentials are missing where OpenSRE runs — check `gcloud auth application-default login` on a workstation, or that the pod's Kubernetes service account is annotated for Workload Identity. It is not an RBAC problem, despite the 403. |
 | **`add-gke-clusters` reports "no endpoint or CA certificate"** | The principal can list clusters but not read their master config. Add `roles/container.clusterViewer`. |
 | **A Cloud Run deploy "succeeded" but nothing changed** | The new revision never became ready, so the old one still serves every request. `gcp_list_cloud_run_services` flags this as `rollout_pending`; the reason is in `failing_conditions`. |
 | **A Cloud SQL instance is `RUNNABLE` but refuses writes** | Either it is out of disk — check `disk_pressure` and `out_of_disk_state` — or you are connected to a read replica, in which case `accepts_writes` is `false` and `replica_of` names the primary. |

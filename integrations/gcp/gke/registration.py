@@ -105,19 +105,29 @@ def _existing(registered: list[Any]) -> tuple[dict[str, str], dict[str, str]]:
     return by_context, by_name
 
 
-def _kubeconfig_for(cluster: DiscoveredCluster, credentials_path: str) -> str:
+def _kubeconfig_for(cluster: DiscoveredCluster, identity: tuple[str, str]) -> str:
+    credentials_path, impersonate_service_account = identity
     return build_kubeconfig(
         context=cluster.context,
         endpoint=cluster.endpoint,
         ca_certificate=cluster.ca_certificate,
         credentials_path=credentials_path,
+        impersonate_service_account=impersonate_service_account,
     )
 
 
-def _credentials_path(project_configs: dict[str, dict[str, Any]], project: str) -> str:
-    """Return the service-account key path that reaches ``project``, if it is a path."""
+def _exec_identity(project_configs: dict[str, dict[str, Any]], project: str) -> tuple[str, str]:
+    """Return ``(service-account key path, impersonated account)`` for ``project``.
+
+    These are the parts of the project's credential settings the auth plugin can
+    be told about, so the kubeconfig authenticates as the identity that
+    discovered the cluster rather than whatever the plugin resolves alone.
+    """
     config = sanitize_config(project_configs.get(project, {}))
-    return credentials_path_for(str(config.get("service_account_key", "")))
+    return (
+        credentials_path_for(str(config.get("service_account_key", ""))),
+        str(config.get("impersonate_service_account", "")).strip(),
+    )
 
 
 def register_gke_clusters(
@@ -208,9 +218,7 @@ def register_gke_clusters(
 
         result = add_cluster(
             name=instance,
-            kubeconfig=_kubeconfig_for(
-                cluster, _credentials_path(project_configs, cluster.project)
-            ),
+            kubeconfig=_kubeconfig_for(cluster, _exec_identity(project_configs, cluster.project)),
             context=cluster.context,
             tags={
                 "source": _SOURCE_TAG,
