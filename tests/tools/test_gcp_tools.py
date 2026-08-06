@@ -237,6 +237,44 @@ def test_logging_query_batches_one_credential_into_one_call(
     assert result["projects"] == ["acme", "acme-staging"]
 
 
+def test_logging_query_splits_a_discovered_estate_across_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloud Logging takes at most 100 resourceNames and rejects the whole call above it.
+
+    Reachable in one line via ``GCP_ADDITIONAL_PROJECTS=discover``: an org-level
+    grant resolves ``project="*"`` to the entire estate, so without splitting,
+    the broadest query is the one guaranteed to fail. One credential, so still
+    one client — but three requests, merged newest-first like any other fan-out.
+    """
+    import integrations.gcp.tools.gcp_logging_query_tool as module
+
+    projects = [f"p{index:03d}" for index in range(250)]
+    config = {"project_id": projects[0]}
+    calls: list[dict[str, Any]] = []
+    pages = [
+        {"entries": [_entry("2026-08-05T10:00:00Z", "oldest")]},
+        {"entries": [_entry("2026-08-05T12:00:00Z", "newest")]},
+        {"entries": [_entry("2026-08-05T11:00:00Z", "middle")]},
+    ]
+    monkeypatch.setattr(
+        module, "build_service", lambda _config, _api: _FakeLoggingService(calls, pages)
+    )
+
+    result = gcp_logging_query(
+        project="*",
+        default_project=projects[0],
+        available_projects=projects,
+        project_configs=dict.fromkeys(projects, config),
+    )
+
+    assert [len(call["resourceNames"]) for call in calls] == [100, 100, 50]
+    # Split, not sampled: every project is queried exactly once.
+    queried = [name for call in calls for name in call["resourceNames"]]
+    assert queried == [f"projects/{project}" for project in projects]
+    assert [entry["message"] for entry in result["entries"]] == ["newest", "middle", "oldest"]
+
+
 def test_logging_query_fans_out_across_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     import integrations.gcp.tools.gcp_logging_query_tool as module
 
@@ -478,7 +516,7 @@ def test_list_projects_is_unavailable_without_configuration() -> None:
 def test_list_projects_merges_discovery_and_skips_deleted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import integrations.gcp.tools.gcp_list_projects_tool as module
+    import integrations.gcp.project_discovery as module
 
     response = {
         "projects": [
@@ -504,7 +542,7 @@ def test_list_projects_merges_discovery_and_skips_deleted(
 def test_list_projects_survives_a_missing_list_permission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import integrations.gcp.tools.gcp_list_projects_tool as module
+    import integrations.gcp.project_discovery as module
 
     monkeypatch.setattr(
         module,

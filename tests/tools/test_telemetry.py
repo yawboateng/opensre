@@ -1068,9 +1068,15 @@ def test_gcp_list_projects_reports_a_partial_failure_at_warning_severity(
     so the tool degrades: it reports at ``warning`` and returns the configured
     list rather than an unavailable envelope.
     """
+    import integrations.gcp.project_discovery as discovery
     import integrations.gcp.tools.gcp_list_projects_tool as mod
 
-    monkeypatch.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("discovery")))
+    # The listing itself lives in ``project_discovery`` — it is shared with
+    # allow-list expansion — but the event must still be tagged with the tool
+    # that ran, which is what this test exists to pin.
+    monkeypatch.setattr(
+        discovery, "build_service", MagicMock(side_effect=RuntimeError("discovery"))
+    )
 
     result = mod.gcp_list_projects(
         default_project="p",
@@ -1086,6 +1092,35 @@ def test_gcp_list_projects_reports_a_partial_failure_at_warning_severity(
     assert isinstance(event.exc, RuntimeError)
     assert event.extras["tag.tool_name"] == "gcp_list_projects"
     assert event.extras["tag.source"] == "gcp"
+
+
+def test_gcp_list_projects_reports_one_event_however_many_credentials_fail(
+    captured_sentry_events: list[CapturedSentryEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per tool call, not per credential.
+
+    ``GCP_INSTANCES`` deployments list once per registered credential. The
+    failure they all hit is the same missing grant, so reporting per credential
+    would multiply one configuration gap by the instance count on every call —
+    and the tool is called at the start of most GCP investigations.
+    """
+    import integrations.gcp.project_discovery as discovery
+    import integrations.gcp.tools.gcp_list_projects_tool as mod
+
+    monkeypatch.setattr(discovery, "build_service", MagicMock(side_effect=RuntimeError("nope")))
+
+    result = mod.gcp_list_projects(
+        default_project="p",
+        available_projects=["p", "q"],
+        project_configs={
+            "p": {"project_id": "p", "service_account_key": '{"type":"one"}'},
+            "q": {"project_id": "q", "service_account_key": '{"type":"two"}'},
+        },
+    )
+
+    assert result["projects"] == ["p", "q"]
+    assert len(captured_sentry_events) == 1
 
 
 def test_eks_client_error_path_uses_warning_severity(

@@ -105,3 +105,25 @@ def resolve_projects(
 def resource_names(projects: list[str]) -> list[str]:
     """Render project IDs as Cloud Logging ``resourceNames`` entries."""
     return [f"projects/{project}" for project in projects]
+
+
+#: Cloud Logging: "A maximum of 100 resources may be specified in a single
+#: request." Exceeding it fails the whole ``entries.list`` call — the API
+#: validates the set, so one project too many loses every project's logs, not
+#: just the overflow.
+MAX_RESOURCE_NAMES = 100
+
+
+def resource_name_batches(projects: list[str]) -> list[list[str]]:
+    """Split ``projects`` into request-sized ``resourceNames`` batches.
+
+    A single-credential estate of any ordinary size stays one batch and one
+    request. Batching exists for the estate that ``GCP_ADDITIONAL_PROJECTS=
+    discover`` makes reachable in one line: an org-level grant can resolve
+    ``project="*"`` to hundreds of projects, and without this the query that
+    needs them most is the one that fails.
+    """
+    return [
+        resource_names(projects[start : start + MAX_RESOURCE_NAMES])
+        for start in range(0, len(projects), MAX_RESOURCE_NAMES)
+    ]
