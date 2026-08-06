@@ -75,6 +75,11 @@ GITHUB_MCP_MODE=streamable-http                      # default
 GITHUB_MCP_TOOLSETS=repos,issues,pull_requests,actions  # default
 ```
 
+Only `GITHUB_MCP_AUTH_TOKEN` is required for GitHub.com — the rest are shown
+with the values they already take. Set `GITHUB_MCP_URL` for GitHub Enterprise
+Server, and `GITHUB_MCP_COMMAND` if you run the MCP server yourself over
+`stdio`.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `GITHUB_MCP_AUTH_TOKEN` | — | GitHub personal access token. Required unless you authorize in the browser (Option 1) |
