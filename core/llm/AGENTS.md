@@ -93,7 +93,11 @@ Do not add a separate Azure client class — extend `transports/litellm/routing.
 Vertex AI authenticates via Google Application Default Credentials (ADC) — no API key:
 
 - `VERTEX_AI_PROJECT`, `VERTEX_AI_LOCATION` (defaults to `us-central1`)
-- `VERTEX_AI_*_MODEL` env vars hold Gemini model IDs served via Vertex (e.g. `gemini-2.5-pro`)
+- `VERTEX_AI_*_MODEL` env vars hold any Vertex publisher-model ID, passed through verbatim.
+  The wizard's curated list and the defaults are Gemini (`gemini-2.5-pro`), but Anthropic
+  Claude served through Vertex works unchanged — set them to the Model Garden IDs
+  (`claude-opus-4-5@20251101`); LiteLLM routes `vertex_ai/claude-*` to the Anthropic
+  publisher endpoint.
 - LiteLLM model string: `vertex_ai/<model>` via `resolve_vertex_ai_request_kwargs()`
 
 Do not add a separate Vertex client class — extend `transports/litellm/routing.py` and helpers in

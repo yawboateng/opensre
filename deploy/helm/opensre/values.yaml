@@ -21,6 +21,13 @@ config:
   llmProvider: anthropic
   # Extra non-secret env vars applied to both workloads, e.g.:
   #   OPENSRE_DEPLOYMENT_METHOD: kubernetes
+  #
+  # REQUIRED FOR SLACK — a Slack turn is refused outright without an owning
+  # organization ("no organization is configured for this deployment"):
+  #   ORGANIZATION_ID: my-org         # who owns data produced by a Slack turn
+  #   OPENSRE_SILO_TEAM_IDS: T0123    # allowlisted Slack team ids; unset serves
+  #                                   # ANY workspace that installs the app
+  # See docs/principal-scoped-storage.mdx.
   extraEnv: {}
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,14 @@ config:
   llmProvider: anthropic
   extraEnv:
     OPENSRE_DEPLOYMENT_METHOD: kubernetes
+    # Required whenever the gateway serves Slack: it names the organization
+    # that owns the data a Slack turn produces. Unset, every Slack turn is
+    # refused with "no organization is configured for this deployment".
+    ORGANIZATION_ID: <organization-id>
+    # Slack team ids this deployment serves, comma-separated. Strongly
+    # recommended: unset, ANY workspace that installs the app is served from
+    # this organization's identity and inherits its credentials.
+    OPENSRE_SILO_TEAM_IDS: <T0123456789>
 
 # Credentials managed out-of-band. The referenced Secret must contain the LLM
 # API key (e.g. ANTHROPIC_API_KEY), KUBECONFIG_CONTENT for target clusters,

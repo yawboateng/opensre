@@ -1283,6 +1283,9 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "kubernetes_get_events",
         "kubernetes_get_pod_logs",
         "kubernetes_get_resource",
+        # Pure read of the already-resolved instance list injected by
+        # extract_params; run() builds a dict and cannot fail.
+        "kubernetes_list_clusters",
         "kubernetes_list_configmaps",
         "kubernetes_list_daemonsets",
         "kubernetes_list_deployments",
