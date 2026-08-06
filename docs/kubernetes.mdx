@@ -138,8 +138,9 @@ opensre integrations add-gke-clusters --project '*'
 ```
 
 Add `--dry-run` to see what it would do first. Re-running is safe — clusters
-already registered are skipped. It needs `gke-gcloud-auth-plugin` on PATH
-(`gcloud components install gke-gcloud-auth-plugin`); the kubeconfigs it writes
+already registered are skipped. It needs `gke-gcloud-auth-plugin` on PATH — the
+container image ships with it, so on a workstation install it with
+`gcloud components install gke-gcloud-auth-plugin`. The kubeconfigs it writes
 hold no credentials, only an instruction to ask that plugin for a token. Full
 detail, including which identity the plugin authenticates as, is in
 [Google Cloud](/gcp#registering-your-gke-clusters-automatically).

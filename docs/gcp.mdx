@@ -268,7 +268,7 @@ opensre integrations add-gke-clusters --project '*'
 
 This discovers the clusters, generates a kubeconfig for each, and registers it under the [Kubernetes integration](/kubernetes), so `kubernetes_list_pods` and friends can target it by name. Re-running is safe — clusters already registered are skipped.
 
-**Requires [`gke-gcloud-auth-plugin`](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl) on PATH:**
+**Requires [`gke-gcloud-auth-plugin`](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl) on PATH.** The OpenSRE container image ships with it, so this applies to workstation installs only:
 
 ```bash
 gcloud components install gke-gcloud-auth-plugin
@@ -350,7 +350,7 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | **Nothing from `gcp_list_projects` beyond what you configured** | The credential lacks `resourcemanager.projects.list`. Harmless — configured projects still work. |
 | **`gcp_audit_log_query` returns nothing for `data_access`** | Data Access audit logs are disabled by default. Enable them per service in **IAM & Admin → Audit Logs**, or query `activity` instead. |
 | **A GKE cluster is listed but has no `registered_as`** | No kubeconfig is registered for it, so the `kubernetes_*` tools cannot reach it. Run `opensre integrations add-gke-clusters --project '*'`, or investigate it through Cloud Logging and Monitoring. |
-| **`add-gke-clusters` says the plugin is not on PATH** | Install it with `gcloud components install gke-gcloud-auth-plugin`. Without it the generated kubeconfig cannot obtain a token, so the command refuses to write one. |
+| **`add-gke-clusters` says the plugin is not on PATH** | Install it with `gcloud components install gke-gcloud-auth-plugin`. Without it the generated kubeconfig cannot obtain a token, so the command refuses to write one. The container image already includes the plugin, so seeing this in a pod means the image predates that change. |
 | **`add-gke-clusters` registers a cluster but `kubernetes_*` calls fail to authenticate** | The auth plugin is resolving different credentials than OpenSRE. Point `GOOGLE_APPLICATION_CREDENTIALS` at the same service-account key, or run `gcloud auth application-default login`. |
 | **`add-gke-clusters` reports "no endpoint or CA certificate"** | The principal can list clusters but not read their master config. Add `roles/container.clusterViewer`. |
 | **A Cloud Run deploy "succeeded" but nothing changed** | The new revision never became ready, so the old one still serves every request. `gcp_list_cloud_run_services` flags this as `rollout_pending`; the reason is in `failing_conditions`. |
