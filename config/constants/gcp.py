@@ -42,8 +42,10 @@ GCP_INSTANCES_ENV: Final[str] = "GCP_INSTANCES"
 #: start. Off unless set, because it widens what the agent can reach — every
 #: cluster the credential can enumerate in the configured projects becomes a
 #: target for the ``kubernetes_*`` tools, some of which act rather than read.
-#: Accepts ``true`` for every configured project, or the same comma-separated
-#: project grammar the GCP tools take, to narrow it further.
+#: Accepts ``true`` for every configured project, the same comma-separated
+#: project grammar the GCP tools take, or ``project/cluster`` entries to narrow
+#: it to named clusters — the granularity that matters when a project holds one
+#: cluster worth investigating and several that are not the agent's business.
 GCP_AUTO_REGISTER_GKE_ENV: Final[str] = "GCP_AUTO_REGISTER_GKE"
 
 __all__ = [

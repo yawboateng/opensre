@@ -12,10 +12,12 @@ none.
 and some ``kubernetes_*`` tools act rather than read. "Every cluster my
 credential can enumerate is now a target" is a policy decision an operator
 should make explicitly, not a side effect of a boot sequence — so nothing
-happens unless :data:`GCP_AUTO_REGISTER_GKE_ENV` says so. Scope is bounded twice
-over: to the projects that variable names, and to the projects the GCP
+happens unless :data:`GCP_AUTO_REGISTER_GKE_ENV` says so. Scope is bounded three
+times over: to the projects that variable names, to the projects the GCP
 integration is already configured for (``resolve_projects`` rejects anything
-else), so even ``true`` cannot reach an estate nobody configured.
+else) so even ``true`` cannot reach an estate nobody configured, and — when an
+entry is written ``project/cluster`` — to the named clusters inside them. See
+:mod:`integrations.gcp.gke.scope` for that grammar.
 
 **Runs on a daemon thread.** Discovery is several round trips to
 ``container.googleapis.com`` and verification one more per cluster, over an
@@ -35,9 +37,14 @@ import threading
 
 from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
 from config.constants.kubernetes import KUBECONFIG_CONTENT_ENV, KUBERNETES_INSTANCES_ENV
-from integrations.catalog import load_env_integrations, resolve_local_classified_integrations
+from integrations.catalog import (
+    classify_integrations,
+    load_env_integrations,
+    resolve_local_classified_integrations,
+)
 from integrations.gcp.gke.kubeconfig import AUTH_PLUGIN, plugin_installed
 from integrations.gcp.gke.registration import Outcome, register_gke_clusters
+from integrations.gcp.gke.scope import ScopeSpec, parse_scopes
 
 #: Values that mean "off". Unset is off too — the point of an opt-in.
 _DISABLED = frozenset({"", "0", "false", "no", "off"})
@@ -67,21 +74,20 @@ _started_thread: threading.Thread | None = None
 _start_lock = threading.Lock()
 
 
-def requested_projects() -> str | None:
-    """Return the project selector to register, or ``None`` when opted out.
+def requested_scope() -> ScopeSpec | None:
+    """Return what to register, or ``None`` when the operator did not opt in.
 
-    The returned value is passed straight to ``register_gke_clusters`` as its
-    ``project`` argument, so an operator writing ``GCP_AUTO_REGISTER_GKE=a,b``
-    gets the same grammar — and the same rejection of unconfigured projects —
-    that every GCP tool call already uses.
+    An operator writing ``GCP_AUTO_REGISTER_GKE=a,b`` gets the same project
+    grammar — and the same rejection of unconfigured projects — that every GCP
+    tool call already uses. Appending ``/<cluster>`` to any entry narrows it to
+    one cluster in that project, for the common case of a project holding one
+    cluster worth investigating and several that are not the agent's business.
     """
     raw = os.getenv(GCP_AUTO_REGISTER_GKE_ENV, "").strip()
     folded = raw.lower()
     if folded in _DISABLED:
         return None
-    if folded in _ENABLED:
-        return _ALL_CONFIGURED
-    return raw
+    return parse_scopes(_ALL_CONFIGURED if folded in _ENABLED else raw)
 
 
 def start_gke_autoregistration(logger: logging.Logger) -> threading.Thread | None:
@@ -99,15 +105,15 @@ def start_gke_autoregistration(logger: logging.Logger) -> threading.Thread | Non
     """
     global _started_thread
 
-    selector = requested_projects()
-    if selector is None:
+    scope = requested_scope()
+    if scope is None:
         return None
     with _start_lock:
         if _started_thread is not None:
             return _started_thread
         _started_thread = threading.Thread(
             target=_run,
-            args=(logger, selector),
+            args=(logger, scope),
             name=_THREAD_NAME,
             daemon=True,
         )
@@ -115,35 +121,45 @@ def start_gke_autoregistration(logger: logging.Logger) -> threading.Thread | Non
         return _started_thread
 
 
-def _run(logger: logging.Logger, selector: str) -> None:
+def _run(logger: logging.Logger, scope: ScopeSpec) -> None:
     """Thread body. Never raises: a boot-time convenience must not kill a process."""
     try:
-        register_now(logger, selector)
+        register_now(logger, scope)
     except Exception as exc:  # noqa: BLE001
         logger.warning("GKE auto-registration failed (%s)", type(exc).__name__)
 
 
 def env_declares_kubernetes() -> bool:
-    """Whether the environment contributes a kubernetes record to the merge.
+    """Whether the environment gives the ``kubernetes_*`` tools a cluster to use.
 
-    Asks the loader whose output is actually merged rather than re-reading the
-    variables, so the two can never disagree. That matters in both directions:
+    The question is not "is a variable set" and not even "does a record come out
+    of the loader" — it is "would standing down leave the operator with a working
+    integration?" Only classification answers that, so this runs the env records
+    through the same classifier the tools read and looks for the service there.
 
-    * ``KUBERNETES_INSTANCES`` that is set but not parseable — a bare cluster
-      name instead of a JSON array, say — contributes **nothing**. Treating the
-      variable's mere presence as authoritative would stand us down in favour of
-      an environment that declares no clusters at all, leaving the operator with
-      neither: no env-declared clusters, no auto-registered ones, and a
-      ``kubernetes`` integration that simply is not there.
-    * ``KUBECONFIG_CONTENT`` / ``KUBECONFIG_PATH`` declare a default cluster
-      without ``KUBERNETES_INSTANCES`` being involved at all, and the store
-      shadows that record exactly as thoroughly. Reading one variable name would
-      miss it.
+    Each cheaper check fails on a real input:
+
+    * **The variable's presence.** ``KUBERNETES_INSTANCES`` takes a JSON array of
+      instance objects; a bare cluster name does not parse, so the loader warns
+      and falls through, and the variable contributes nothing.
+    * **A record from the loader.** An entry carrying ``name`` and ``tags`` but no
+      ``credentials`` parses into a perfectly good-looking record — and the
+      classifier then drops it, because an instance with no kubeconfig cannot
+      connect to anything.
+
+    Both leave the operator with neither: no env-declared clusters, no
+    auto-registered ones, and no ``kubernetes`` integration at all, from config
+    that looks set. Deferring only to an environment that actually works is what
+    keeps this guard from being a worse footgun than the one it prevents.
+
+    It is also broader than one variable by design: ``KUBECONFIG_CONTENT`` /
+    ``KUBECONFIG`` declare a default cluster with ``KUBERNETES_INSTANCES``
+    uninvolved, and the store shadows that record exactly as completely.
     """
-    return any(record.get("service") == "kubernetes" for record in load_env_integrations())
+    return "kubernetes" in classify_integrations(load_env_integrations())
 
 
-def register_now(logger: logging.Logger, selector: str) -> None:
+def register_now(logger: logging.Logger, scope: ScopeSpec) -> None:
     """Discover and register, logging the outcome. Synchronous; may raise."""
     if env_declares_kubernetes():
         # The store overrides the environment for a whole service, not per
@@ -171,12 +187,28 @@ def register_now(logger: logging.Logger, selector: str) -> None:
 
     report = register_gke_clusters(
         resolved=resolve_local_classified_integrations(),
-        project=selector,
+        # Both from the one spec: a hand-composed project list that disagreed
+        # with the filter would sweep projects the filter then rejects entirely,
+        # and the only symptom is "registered 0" with nothing explaining it.
+        project=scope.project_selector,
+        cluster_scope=scope,
         tags={_AUTO_TAG: "true"},
     )
 
     for error in report.errors:
         logger.warning("GKE auto-registration: %s", error)
+    if report.excluded:
+        # The scope is operator intent, so this is confirmation rather than a
+        # problem — but it is also the only place a mistyped cluster name shows
+        # up. Listing what was passed over next to what was kept lets the
+        # spelling be compared without a second run.
+        logger.info(
+            "GKE auto-registration: %d cluster(s) outside %s=%s — %s",
+            len(report.excluded),
+            GCP_AUTO_REGISTER_GKE_ENV,
+            scope,
+            ", ".join(report.excluded),
+        )
     for result in report.results:
         if result.outcome is Outcome.REGISTERED:
             logger.info(
@@ -203,6 +235,6 @@ def register_now(logger: logging.Logger, selector: str) -> None:
 __all__ = [
     "env_declares_kubernetes",
     "register_now",
-    "requested_projects",
+    "requested_scope",
     "start_gke_autoregistration",
 ]

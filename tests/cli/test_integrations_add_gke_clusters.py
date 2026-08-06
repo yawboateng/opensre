@@ -171,6 +171,64 @@ def test_flags_reach_the_registration_call(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.usefixtures("_no_store")
+def test_no_cluster_flag_sends_no_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default has always been "register everything --project found"."""
+    recorder = _Recorder(_report(_registered()))
+    _set_plugin(monkeypatch, installed=True)
+    _set_register(monkeypatch, recorder)
+
+    result = CliRunner().invoke(add_gke_clusters_command, [])
+
+    assert result.exit_code == SUCCESS
+    assert recorder.calls[0]["cluster_scope"] is None
+
+
+@pytest.mark.usefixtures("_no_store")
+def test_cluster_flags_narrow_what_is_registered_without_moving_the_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--project`` decides what is discovered; ``--cluster`` only filters it.
+
+    Deriving projects from ``--cluster`` too would give the run two answers about
+    where to look, and the flag can name a cluster without naming its project.
+    """
+    recorder = _Recorder(_report(_registered("checkout")))
+    _set_plugin(monkeypatch, installed=True)
+    _set_register(monkeypatch, recorder)
+
+    result = CliRunner().invoke(
+        add_gke_clusters_command,
+        ["--project", "acme", "--cluster", "checkout", "--cluster", "billing"],
+    )
+
+    assert result.exit_code == SUCCESS
+    call = recorder.calls[0]
+    assert call["project"] == "acme"
+    scope = call["cluster_scope"]
+    assert scope.admits("acme", "checkout")
+    assert scope.admits("acme", "billing")
+    assert not scope.admits("acme", "payments")
+
+
+@pytest.mark.usefixtures("_no_store")
+def test_a_cluster_name_that_matched_nothing_is_answered_with_what_was_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo is the one way --cluster fails, and it fails by doing nothing."""
+    report = _report()
+    report.excluded = ["checkout (acme)", "billing (acme)"]
+    recorder = _Recorder(report)
+    _set_plugin(monkeypatch, installed=True)
+    _set_register(monkeypatch, recorder)
+
+    result = CliRunner().invoke(add_gke_clusters_command, ["--cluster", "chekout"])
+
+    assert "checkout (acme)" in result.output
+    assert "billing (acme)" in result.output
+    assert "No GKE cluster matched --cluster" in result.output
+
+
+@pytest.mark.usefixtures("_no_store")
 def test_a_malformed_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = _Recorder(_report())
     _set_plugin(monkeypatch, installed=True)

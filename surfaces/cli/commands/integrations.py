@@ -232,6 +232,13 @@ def remove_cluster_command(name: str) -> None:
     help="GCP project to scan. Omit for the default project, comma-separate several, or '*'.",
 )
 @click.option(
+    "--cluster",
+    "clusters",
+    multiple=True,
+    metavar="NAME",
+    help="Register only this cluster; repeatable. Omit to register every cluster found.",
+)
+@click.option(
     "--tag",
     "tags",
     multiple=True,
@@ -246,7 +253,12 @@ def remove_cluster_command(name: str) -> None:
 @click.option("--no-verify", is_flag=True, help="Skip the connectivity probe before saving.")
 @click.option("--dry-run", is_flag=True, help="Report what would be registered; change nothing.")
 def add_gke_clusters_command(
-    project: str, tags: tuple[str, ...], overwrite: bool, no_verify: bool, dry_run: bool
+    project: str,
+    clusters: tuple[str, ...],
+    tags: tuple[str, ...],
+    overwrite: bool,
+    no_verify: bool,
+    dry_run: bool,
 ) -> None:
     """Discover GKE clusters in your GCP projects and register them for investigation.
 
@@ -264,6 +276,7 @@ def add_gke_clusters_command(
         env_declares_kubernetes,
         plugin_installed,
         register_gke_clusters,
+        scopes_from_cluster_names,
     )
     from platform.common.exit_codes import ERROR, SUCCESS
 
@@ -313,6 +326,9 @@ def add_gke_clusters_command(
         # it reports "no GCP projects are configured" with GCP_PROJECT_ID set.
         resolved=resolve_local_classified_integrations(),
         project=project,
+        # --cluster filters what --project discovered; passing no names leaves
+        # the spec empty, which admits everything and keeps the default behavior.
+        cluster_scope=scopes_from_cluster_names(clusters) if clusters else None,
         tags=parsed_tags,
         overwrite=overwrite,
         verify=verify,
@@ -329,8 +345,18 @@ def add_gke_clusters_command(
     for problem in report.errors:
         click.echo(f"! {problem}", err=True)
 
+    if report.excluded:
+        # Naming them turns the one real failure mode of --cluster — a typo —
+        # from "nothing happened" into a spelling the operator can compare
+        # against, without a second discovery run.
+        click.echo(f"- skipped by --cluster: {', '.join(report.excluded)}")
+
     if not report.results and not report.errors:
-        click.echo("No GKE clusters found in the configured projects.")
+        click.echo(
+            "No GKE clusters found in the configured projects."
+            if not report.excluded
+            else "No GKE cluster matched --cluster; the names above are what was found."
+        )
 
     registered = report.count(Outcome.REGISTERED)
     failed = report.count(Outcome.FAILED)

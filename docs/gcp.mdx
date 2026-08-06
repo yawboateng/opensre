@@ -78,7 +78,7 @@ The ambient principal needs `roles/iam.serviceAccountTokenCreator` on the target
 | `GCP_IMPERSONATE_SERVICE_ACCOUNT` | — | Service account to impersonate on top of the ambient credential |
 | `GCP_MAX_RESULTS` | `100` | Default page size for log and metric queries (clamped to `1`–`1000`) |
 | `GCP_INSTANCES` | — | JSON array registering several GCP estates, each with its own credential. See [Multiple projects](#multiple-projects) |
-| `GCP_AUTO_REGISTER_GKE` | — | Register discovered GKE clusters at startup. `true` for every configured project, or a comma-separated project list. See [Registering at startup](#registering-at-startup-containers) |
+| `GCP_AUTO_REGISTER_GKE` | — | Register discovered GKE clusters at startup. `true` for every configured project, a comma-separated project list, or `project/cluster` entries for named clusters. See [Registering at startup](#registering-at-startup-containers) |
 
 ## Multiple projects
 
@@ -286,6 +286,7 @@ When `GCP_SERVICE_ACCOUNT_KEY` is a **file path**, the generated kubeconfig pins
 | Option | What it does |
 |---|---|
 | `--project` | One project, a comma-separated list, or `*`. Omit for the default project. |
+| `--cluster NAME` | Register only this cluster, out of everything `--project` finds. Repeatable. |
 | `--dry-run` | Report what would be registered; write nothing. |
 | `--tag KEY=VALUE` | Attach a tag to every cluster registered. Repeatable. |
 | `--overwrite` | Replace an existing instance whose name matches but points at another cluster. |
@@ -306,9 +307,16 @@ Clusters with a **private endpoint only** are reachable from inside their VPC. R
 Set `GCP_AUTO_REGISTER_GKE` and each process registers the clusters itself as it starts:
 
 ```bash
-GCP_AUTO_REGISTER_GKE=true              # every configured project
-GCP_AUTO_REGISTER_GKE=prod-a,prod-b     # only these
+GCP_AUTO_REGISTER_GKE=true                      # every cluster in every configured project
+GCP_AUTO_REGISTER_GKE=prod-a,prod-b             # every cluster in these two projects
+GCP_AUTO_REGISTER_GKE=prod-a/checkout           # one named cluster, nothing else
+GCP_AUTO_REGISTER_GKE=prod-a/checkout,prod-b    # mix the two freely
+GCP_AUTO_REGISTER_GKE='*/checkout'              # that cluster, whichever project holds it
 ```
+
+Reach for `project/cluster` when a project holds one cluster worth investigating and others that are not the agent's business — registering a cluster is what makes it reachable by tools that restart deployments and delete pods, and project granularity is all-or-nothing. Cluster names are matched exactly and are qualified by project on purpose: two clusters called `prod` in different projects is ordinary, so an unqualified name would quietly register both. Say `*/prod` when you mean that.
+
+Clusters that were found and then filtered out are listed in the startup log, so a mistyped name shows up as a name you can compare against rather than as nothing happening.
 
 It is off unless you set it, on purpose: registering a cluster is what makes it reachable by tools that can restart deployments and delete pods, so widening that reach should be a decision you made rather than something a boot sequence did for you. `true` still only covers projects you configured in `GCP_PROJECT_ID` / `GCP_ADDITIONAL_PROJECTS` / `GCP_INSTANCES` — it never enumerates your whole organisation.
 
