@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
 from integrations.gcp.tools.gcp_list_projects_tool import gcp_list_projects
 from integrations.gcp.tools.gcp_logging_query_tool import gcp_logging_query
 from integrations.gcp.tools.gcp_logging_query_tool.entries import extract_message, normalize_entry
@@ -18,6 +19,7 @@ from integrations.gcp.tools.gcp_monitoring_query_tool.aligners import (
     extract_metric_type,
 )
 from integrations.gcp.tools.gcp_monitoring_query_tool.series import normalize_series, point_value
+from integrations.gcp.tools.gcp_refresh_discovery_tool import gcp_refresh_discovery
 from tools.registry import get_registered_tool
 
 _NOW = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
@@ -559,3 +561,143 @@ def test_list_projects_survives_a_missing_list_permission(
     # Losing the optional expansion must not lose the configured answer.
     assert result["projects"] == ["acme", "acme-staging"]
     assert "discovery_error" in result
+
+
+# --- gcp_refresh_discovery -----------------------------------------------------
+
+
+def _rm_returning(*project_ids: str) -> Any:
+    """A Resource Manager stub that lists ``project_ids`` as ACTIVE."""
+    response = {"projects": [{"projectId": pid, "lifecycleState": "ACTIVE"} for pid in project_ids]}
+    return lambda _config, _api: _FakeRMService(response)
+
+
+def test_refresh_re_reads_a_listing_the_cache_would_have_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the tool exists: a project created after the last listing.
+
+    ``gcp_list_projects`` is answered from cache by design, so without a forced
+    re-read the operator's only route to a newly created project is a restart.
+    """
+    import integrations.gcp.project_discovery as module
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "")
+    monkeypatch.setattr(module, "build_service", _rm_returning("acme"))
+    args: dict[str, Any] = {
+        "default_project": "acme",
+        "available_projects": ["acme"],
+        "project_configs": {"acme": {"project_id": "acme"}},
+    }
+
+    cached = gcp_list_projects(**args)
+    monkeypatch.setattr(module, "build_service", _rm_returning("acme", "created-just-now"))
+    still_cached = gcp_list_projects(**args)
+    refreshed = gcp_refresh_discovery(**args)
+
+    assert cached["discovered_projects"] == ["acme"]
+    assert still_cached["discovered_projects"] == ["acme"]
+    assert refreshed["discovered_projects"] == ["acme", "created-just-now"]
+
+
+def test_refresh_leaves_the_allow_list_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It changes timing, not authority.
+
+    A discovered project is queryable only if configuration allows it. If a
+    forced refresh widened the allow-list, the tool would be a way for the model
+    to grant itself read access to an estate the operator never configured.
+    """
+    import integrations.gcp.project_discovery as module
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "")
+    monkeypatch.setattr(module, "build_service", _rm_returning("acme", "not-configured"))
+
+    result = gcp_refresh_discovery(
+        default_project="acme",
+        available_projects=["acme"],
+        project_configs={"acme": {"project_id": "acme"}},
+    )
+
+    assert result["configured_projects"] == ["acme"]
+    assert "not-configured" in result["discovered_projects"]
+    assert "note" in result
+
+
+def test_refresh_reports_that_gke_registration_is_switched_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Half the tool does nothing unless opted in; silence would read as success."""
+    import integrations.gcp.project_discovery as module
+
+    monkeypatch.delenv(GCP_AUTO_REGISTER_GKE_ENV, raising=False)
+    monkeypatch.setattr(module, "build_service", _rm_returning("acme"))
+
+    result = gcp_refresh_discovery(
+        default_project="acme",
+        available_projects=["acme"],
+        project_configs={"acme": {"project_id": "acme"}},
+    )
+
+    assert result["gke"]["enabled"] is False
+    assert GCP_AUTO_REGISTER_GKE_ENV in result["gke"]["detail"]
+
+
+def test_refresh_runs_gke_registration_when_it_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    import integrations.gcp.project_discovery as module
+    from integrations.gcp.gke import autoregister
+
+    summary = autoregister.RegistrationSummary(registered=1, instances=("gke-one",))
+
+    def _register(_logger: Any, _scope: Any) -> autoregister.RegistrationSummary:
+        return summary
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    monkeypatch.setattr(module, "build_service", _rm_returning("acme"))
+    monkeypatch.setattr("integrations.gcp.tools.gcp_refresh_discovery_tool.register_now", _register)
+
+    result = gcp_refresh_discovery(
+        default_project="acme",
+        available_projects=["acme"],
+        project_configs={"acme": {"project_id": "acme"}},
+    )
+
+    assert result["gke"] == {
+        "enabled": True,
+        "ran": True,
+        "registered": 1,
+        "skipped": 0,
+        "failed": 0,
+        "new_instances": ["gke-one"],
+    }
+
+
+def test_a_failed_gke_pass_does_not_lose_the_project_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two independent halves; one failing must not discard the other's answer."""
+    import integrations.gcp.project_discovery as module
+
+    def _boom(_logger: Any, _scope: Any) -> None:
+        raise RuntimeError("control plane unreachable")
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    monkeypatch.setattr(module, "build_service", _rm_returning("acme", "found"))
+    monkeypatch.setattr("integrations.gcp.tools.gcp_refresh_discovery_tool.register_now", _boom)
+
+    result = gcp_refresh_discovery(
+        default_project="acme",
+        available_projects=["acme"],
+        project_configs={"acme": {"project_id": "acme"}},
+    )
+
+    assert result["discovered_projects"] == ["acme", "found"]
+    assert result["gke"]["ran"] is False
+    # The type name, and nothing else: a tool result reaches Slack.
+    assert "RuntimeError" in result["gke"]["error"]
+    assert "control plane unreachable" not in result["gke"]["error"]
+
+
+def test_refresh_is_unavailable_without_configuration() -> None:
+    result = gcp_refresh_discovery()
+
+    assert result["available"] is False

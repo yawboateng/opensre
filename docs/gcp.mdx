@@ -79,6 +79,8 @@ The ambient principal needs `roles/iam.serviceAccountTokenCreator` on the target
 | `GCP_MAX_RESULTS` | `100` | Default page size for log and metric queries (clamped to `1`–`1000`) |
 | `GCP_INSTANCES` | — | JSON array registering several GCP estates, each with its own credential. See [Multiple projects](#multiple-projects) |
 | `GCP_AUTO_REGISTER_GKE` | — | Register discovered GKE clusters at startup. `true` for every configured project, a comma-separated project list, or `project/cluster` entries for named clusters. See [Registering at startup](#registering-at-startup-containers) |
+| `GCP_PROJECT_REFRESH_INTERVAL` | `1800` | Seconds before the project listing is re-read. `0` reads it once per process. Only does anything with `GCP_ADDITIONAL_PROJECTS=discover`. See [Staying current](#staying-current) |
+| `GCP_GKE_REFRESH_INTERVAL` | `1800` | Seconds between GKE registration passes. `0` registers once at startup. Only does anything with `GCP_AUTO_REGISTER_GKE` set. See [Staying current](#staying-current) |
 
 ## Multiple projects
 
@@ -106,15 +108,15 @@ GCP_PROJECT_ID=acme-prod
 GCP_ADDITIONAL_PROJECTS=discover
 ```
 
-At the first GCP tool call, OpenSRE asks which projects the credential can see and allows all of them. You can mix the two — `discover,acme-partner` keeps a project that the listing does not return, such as one reached through a grant on the project itself rather than through the hierarchy.
+At the first GCP tool call, OpenSRE asks which projects the credential can see and allows all of them, and re-asks every 30 minutes. You can mix the two — `discover,acme-partner` keeps a project that the listing does not return, such as one reached through a grant on the project itself rather than through the hierarchy.
 
 This needs the **`resourcemanager.projects.list`** permission (in `roles/browser`, `roles/viewer`, and most folder-level viewer grants). Without it nothing breaks: OpenSRE logs a warning and carries on with the projects you named. Run `gcp_list_projects` to see what the credential can actually reach.
 
 <Warning>
-`discover` grants read access to every project it finds, and it keeps granting it — a project created next month is in scope the next time a pod restarts, with no config change and no review. That is the point of the setting, and it is also the reason to prefer an explicit list when the estate holds anything the agent has no business reading. Note that `GCP_AUTO_REGISTER_GKE=true` means *every configured project*, so pairing it with `discover` also registers GKE clusters org-wide. Name projects or clusters explicitly there if you want log access without cluster access.
+`discover` grants read access to every project it finds, and it keeps granting it — a project created next month is in scope within half an hour, with no config change, no restart, and no review. That is the point of the setting, and it is also the reason to prefer an explicit list when the estate holds anything the agent has no business reading. Note that `GCP_AUTO_REGISTER_GKE=true` means *every configured project*, so pairing it with `discover` also registers GKE clusters org-wide. Name projects or clusters explicitly there if you want log access without cluster access.
 </Warning>
 
-Two practical limits: the listing is capped at 200 projects (you get a warning naming the cap if you exceed it), and it happens **once per process** — a project created after a pod started is picked up on its next restart, not sooner.
+One practical limit: the listing is capped at 200 projects, and you get a warning naming the cap if you exceed it. Name the projects you need instead of using `discover` if you hit it.
 
 ### Many credentials
 
@@ -280,6 +282,12 @@ An empty result does not mean nothing is failing. Error Reporting only sees exce
 
 Lists the projects the agent may target. Returns the configured set, plus anything a live Resource Manager listing turns up when the credential has folder- or org-level visibility. A missing `resourcemanager.projects.list` permission is not an error — the configured set is still returned.
 
+### `gcp_refresh_discovery`
+
+Re-reads the project listing and re-runs GKE registration immediately, instead of waiting for the next interval — see [Staying current](#staying-current). Use it when a project or cluster was created, or access to one granted, during the conversation.
+
+It **grants nothing**. Both halves redo work the deployment already does on a timer, with the scope it already has: `GCP_ADDITIONAL_PROJECTS` still decides which discovered projects become queryable, and the GKE half does nothing unless `GCP_AUTO_REGISTER_GKE` is set. Widening either variable and then calling this changes nothing — the process reads its environment once, at start.
+
 ## Registering your GKE clusters automatically
 
 Anything `gcp_list_gke_clusters` reports under `unregistered_clusters` is visible but unreachable — the `kubernetes_*` tools cannot run against it. One command fixes every one of them:
@@ -350,6 +358,8 @@ GCP_AUTO_REGISTER_GKE=acme-prod       # but only register clusters in one projec
 
 Registration runs in the background, so a slow GKE control plane cannot hold up startup or fail a readiness probe. For a few seconds after boot the clusters are not registered yet; a request arriving in that window sees the `kubernetes_*` tools as unavailable.
 
+The same background thread repeats the pass every 30 minutes, so a cluster built after boot registers itself — see [Staying current](#staying-current).
+
 <Warning>
 Setting `KUBERNETES_INSTANCES` turns startup registration off completely, and this is not a bug. The local store overrides the environment for the whole Kubernetes integration — not cluster by cluster — so writing even one discovered cluster to the store would make every cluster declared in `KUBERNETES_INSTANCES` stop being used. Pick one: `KUBERNETES_INSTANCES` for an explicit list you control, or `GCP_AUTO_REGISTER_GKE` for whatever is out there. The same applies to running `add-gke-clusters` by hand — it warns you before it does it.
 </Warning>
@@ -357,6 +367,28 @@ Setting `KUBERNETES_INSTANCES` turns startup registration off completely, and th
 Requirements are the same as for the command: `gke-gcloud-auth-plugin` on PATH (already in the OpenSRE image) and a credential that can reach the clusters. If the plugin is missing, startup registration logs a warning and does nothing rather than storing clusters that could never connect.
 
 Prefer pinning the exact set? Declare the clusters in `KUBERNETES_INSTANCES` — see [Kubernetes](/kubernetes). `add-gke-clusters --dry-run` prints the names and contexts you need.
+
+## Staying current
+
+An estate changes while the pod is running. Both discovery paths repeat, so a project created this morning or a cluster built an hour ago is reachable without a restart.
+
+| Variable | Default | Repeats |
+| --- | --- | --- |
+| `GCP_PROJECT_REFRESH_INTERVAL` | `1800` | Re-reads the project listing. Only does anything with `GCP_ADDITIONAL_PROJECTS=discover` — a named list has nothing to re-read. |
+| `GCP_GKE_REFRESH_INTERVAL` | `1800` | Runs another GKE registration pass. Only does anything with `GCP_AUTO_REGISTER_GKE` set. |
+
+Both take seconds. `0` — or `off`, `no`, `false`, `never` — means run once at startup and stop. Anything under **60 seconds is raised to 60**, with a warning naming the variable: the project listing is read while assembling the arguments of every GCP tool call, so a sub-minute interval puts a Resource Manager round trip in front of each one, which is the cost the cache exists to remove. A value that is neither a number nor an off spelling logs a warning and falls back to the default — a typo will not silently switch refreshing off.
+
+Two things behave differently to how a timer usually reads:
+
+- **The project interval is a ceiling on staleness, not a schedule.** Nothing polls in the background. The listing is re-read on the first GCP tool call *after* the interval lapses, so an idle deployment does no work and a busy one is never more than one interval behind.
+- **GKE registration is on a real timer**, on the same background thread that does the startup pass. It is additive: a pass registers clusters it has not seen and skips the rest. Clusters deleted in GCP keep their registration until you remove it — dropping them automatically would also drop a cluster that was merely unreachable while the pass ran.
+
+**A refresh can only widen.** If a re-read fails — an expired credential, a Resource Manager outage — the previous listing is kept and a warning is logged, rather than shrinking an allow-list an investigation is already using. The next attempt happens one interval later. If the very first listing fails, you get the projects you configured explicitly and nothing more.
+
+Neither interval affects **which** projects become queryable, only how often the question is asked. `GCP_ADDITIONAL_PROJECTS` still decides that, and changing it needs a restart.
+
+Not willing to wait for the interval? The agent can call `gcp_refresh_discovery` to do both halves now — say "re-check which projects you can see" and it will.
 
 ## Verify
 
@@ -405,7 +437,9 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | --- | --- |
 | **403 `IAM_PERMISSION_DENIED`** | The credential resolved but lacks the role. Run `opensre integrations verify gcp` to see which principal is actually in use — on GKE this is usually the node's `default` compute identity, meaning the Workload Identity annotation is missing or the pod predates it. |
 | **`unknown GCP project(s): …`** | The project is not in `GCP_PROJECT_ID`, `GCP_ADDITIONAL_PROJECTS`, or `GCP_INSTANCES`. Add it — or set `GCP_ADDITIONAL_PROJECTS=discover` to allow everything the credential can see — and restart. |
-| **`GCP project discovery failed …` in the startup log** | `GCP_ADDITIONAL_PROJECTS=discover` is set but the credential lacks `resourcemanager.projects.list`. Grant `roles/browser` at the folder or org level, or list the projects by id instead. Queries still work against the projects you named. |
+| **`GCP project discovery failed …` in the log** | `GCP_ADDITIONAL_PROJECTS=discover` is set but the credential lacks `resourcemanager.projects.list`. Grant `roles/browser` at the folder or org level, or list the projects by id instead. Queries still work against the projects you named. |
+| **`GCP project re-discovery failed … keeping the N project(s) found previously`** | A refresh could not reach Resource Manager, so the last good listing is still in use — nothing has been lost. Usually a rotated or expired credential. It retries at the next interval; `gcp_refresh_discovery` retries now. |
+| **A project or cluster created just now is not visible** | Discovery repeats on an interval — see [Staying current](#staying-current). Ask the agent to refresh (`gcp_refresh_discovery`) rather than restarting the pod. If it is still missing afterwards, the project is visible but not allowed: it needs to be in `GCP_ADDITIONAL_PROJECTS`, which does take a restart. |
 | **`The aligner cannot be applied to metrics with kind CUMULATIVE`** | Only happens with an explicit `aligner`. Drop it and let OpenSRE pick, or use `ALIGN_RATE`. |
 | **Empty log results** | Cloud Logging filters are exact-match by default. Confirm the same filter returns rows in **Logs Explorer** over the same window, and remember the window comes from `hours`, not from a `timestamp` clause in the filter. |
 | **Nothing from `gcp_list_projects` beyond what you configured** | The credential lacks `resourcemanager.projects.list`. Harmless — configured projects still work. |

@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any, cast
 
+from config.constants.gcp import GCP_HTTP_TIMEOUT_SECONDS
 from integrations.config_models import GCPIntegrationConfig
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,30 @@ def resolve_credentials(config: GCPIntegrationConfig) -> Any:
     return base
 
 
+def _timed_transport(config: GCPIntegrationConfig) -> Any:
+    """Return an authorized ``httplib2`` transport with a socket timeout.
+
+    ``httplib2`` accepts a timeout only at construction — there is no
+    per-request override, which is what the "httplib2 transport does not
+    support per-request timeout" warning is telling you. Left at the default it
+    is *no* timeout at all, so a wedged control plane hangs the caller
+    indefinitely. That is survivable on a tool call, where a human eventually
+    gives up; it is not survivable on the background refresh loops, where a
+    single hung call stops the loop for the life of the process and nothing
+    reports it.
+
+    Building the transport ourselves means passing ``http=`` rather than
+    ``credentials=`` to ``discovery.build`` — the two are mutually exclusive,
+    since an authorized transport already carries the credential.
+    """
+    httplib2 = cast(Any, importlib.import_module("httplib2"))
+    auth_httplib2 = cast(Any, importlib.import_module("google_auth_httplib2"))
+    return auth_httplib2.AuthorizedHttp(
+        resolve_credentials(config),
+        http=httplib2.Http(timeout=GCP_HTTP_TIMEOUT_SECONDS),
+    )
+
+
 def build_service(config: GCPIntegrationConfig, api: tuple[str, str]) -> Any:
     """Build a discovery client for ``api`` (an ``(name, version)`` pair).
 
@@ -121,7 +146,7 @@ def build_service(config: GCPIntegrationConfig, api: tuple[str, str]) -> Any:
         return discovery.build(
             name,
             version,
-            credentials=resolve_credentials(config),
+            http=_timed_transport(config),
             cache_discovery=False,
         )
     except GCPClientError:
