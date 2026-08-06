@@ -16,6 +16,37 @@
 #   SLACK_BOT_TOKEN + SLACK_APP_TOKEN (Slack) and/or TELEGRAM_BOT_TOKEN +
 #   TELEGRAM_ALLOWED_USERS (Telegram), plus LLM_PROVIDER and API keys
 
+# --- gke-gcloud-auth-plugin ---------------------------------------------------
+# A GKE kubeconfig — whether written by `opensre integrations add-gke-clusters`
+# or by `gcloud container clusters get-credentials` — carries no credential. It
+# execs `gke-gcloud-auth-plugin` to mint a token per connection. Without that
+# binary on PATH the kubernetes_* tools cannot reach any GKE cluster from inside
+# this image, and add-gke-clusters refuses to write a kubeconfig at all.
+#
+# Only the ~10MB binary is taken. `apt-get install` would pull in
+# google-cloud-cli (~1GB) as a dependency, which nothing else here needs:
+# `apt-get download` fetches the .deb without its dependencies and `dpkg-deb -x`
+# unpacks it without running maintainer scripts. The .deb is architecture-
+# specific, so this stage must build for the same platform as the final image.
+FROM python:3.12-slim AS gke-auth-plugin
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg]" \
+        "https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update \
+    && cd /tmp \
+    && apt-get download google-cloud-cli-gke-gcloud-auth-plugin \
+    && dpkg-deb -x /tmp/google-cloud-cli-gke-gcloud-auth-plugin_*.deb /tmp/extracted \
+    && install -m 0755 \
+        /tmp/extracted/usr/lib/google-cloud-sdk/bin/gke-gcloud-auth-plugin \
+        /usr/local/bin/gke-gcloud-auth-plugin \
+    && rm -rf /var/lib/apt/lists/* /tmp/extracted /tmp/*.deb
+
+# --- runtime ------------------------------------------------------------------
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -27,6 +58,8 @@ RUN apt-get update \
         ca-certificates \
         curl \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=gke-auth-plugin /usr/local/bin/gke-gcloud-auth-plugin /usr/local/bin/gke-gcloud-auth-plugin
 
 COPY . /app
 
