@@ -419,6 +419,90 @@ def _gcp_compute_instances_case() -> ToolFailureCase:
     )
 
 
+def _gcp_cloud_run_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_list_cloud_run_services_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("run")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_list_cloud_run_services_tool import (
+            gcp_list_cloud_run_services,
+        )
+
+        return gcp_list_cloud_run_services(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_list_cloud_run_services",
+        patch,
+        invoke,
+        "gcp_list_cloud_run_services",
+        "gcp",
+    )
+
+
+def _gcp_cloud_sql_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_list_cloud_sql_instances_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("sqladmin")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_list_cloud_sql_instances_tool import (
+            gcp_list_cloud_sql_instances,
+        )
+
+        return gcp_list_cloud_sql_instances(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_list_cloud_sql_instances",
+        patch,
+        invoke,
+        "gcp_list_cloud_sql_instances",
+        "gcp",
+    )
+
+
+def _gcp_pubsub_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_pubsub_backlog_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("pubsub")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_pubsub_backlog_tool import gcp_pubsub_backlog
+
+        return gcp_pubsub_backlog(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_pubsub_backlog",
+        patch,
+        invoke,
+        "gcp_pubsub_backlog",
+        "gcp",
+    )
+
+
+def _gcp_error_reporting_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_error_reporting_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("errorreporting")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_error_reporting_tool import gcp_error_reporting_top_errors
+
+        return gcp_error_reporting_top_errors(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_error_reporting_top_errors",
+        patch,
+        invoke,
+        "gcp_error_reporting_top_errors",
+        "gcp",
+    )
+
+
 def _eks_list_clusters_case() -> ToolFailureCase:
     def patch(mp: pytest.MonkeyPatch) -> None:
         import integrations.eks.tools as mod
@@ -905,6 +989,10 @@ _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _gcp_audit_case(),
     _gcp_gke_clusters_case(),
     _gcp_compute_instances_case(),
+    _gcp_cloud_run_case(),
+    _gcp_cloud_sql_case(),
+    _gcp_pubsub_case(),
+    _gcp_error_reporting_case(),
     _eks_list_clusters_case(),
     _eks_describe_cluster_case(),
     _eks_nodegroup_case(),
@@ -1137,6 +1225,10 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "gcp_audit_log_query",
         "gcp_list_gke_clusters",
         "gcp_list_compute_instances",
+        "gcp_list_cloud_run_services",
+        "gcp_list_cloud_sql_instances",
+        "gcp_pubsub_backlog",
+        "gcp_error_reporting_top_errors",
         # EKS — enumerated in #1463
         "list_eks_clusters",
         "describe_eks_cluster",
