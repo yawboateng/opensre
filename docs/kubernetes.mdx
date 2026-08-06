@@ -128,19 +128,36 @@ OpenSRE calls `kubernetes_list_clusters` to see `gke-dev` and `gke-prod`, then
 calls the other tools with `cluster="gke-dev"` and `cluster="gke-prod"` to reach
 each one.
 
+### Registering every GKE cluster at once
+
+If the [Google Cloud integration](/gcp) is configured, you do not have to add GKE
+clusters by hand. One command discovers them and registers each one:
+
+```bash
+opensre integrations add-gke-clusters --project '*'
+```
+
+Add `--dry-run` to see what it would do first. Re-running is safe — clusters
+already registered are skipped. It needs `gke-gcloud-auth-plugin` on PATH
+(`gcloud components install gke-gcloud-auth-plugin`); the kubeconfigs it writes
+hold no credentials, only an instruction to ask that plugin for a token. Full
+detail, including which identity the plugin authenticates as, is in
+[Google Cloud](/gcp#registering-your-gke-clusters-automatically).
+
 ### Finding GKE clusters you have not registered
 
-`kubernetes_list_clusters` only knows about clusters someone registered here. If
-the [Google Cloud integration](/gcp) is configured, `gcp_list_gke_clusters` asks
-GCP instead and lists every cluster in your projects, saying for each one whether
-a kubeconfig is registered (`registered_as`) or not. That is how an investigation
-notices a cluster nobody added — and the name it reports is the one to pass as
-`cluster` once you register it.
+`kubernetes_list_clusters` only knows about clusters someone registered here.
+`gcp_list_gke_clusters` asks GCP instead and lists every cluster in your
+projects, saying for each one whether a kubeconfig is registered
+(`registered_as`) or not. That is how an investigation notices a cluster nobody
+added — and the name it reports is the one to pass as `cluster` once you
+register it.
 
 The match is on the kubeconfig `context`: register the cluster with the context
 `gcloud container clusters get-credentials` writes
 (`gke_<project>_<location>_<cluster>`), or name the entry after the cluster
-itself, and the two sides line up automatically.
+itself, and the two sides line up automatically. `add-gke-clusters` uses that
+same context, so clusters it registers are recognized immediately.
 
 ## Configuration reference
 
