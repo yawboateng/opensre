@@ -222,3 +222,88 @@ def remove_cluster_command(name: str) -> None:
     result = remove_cluster(name)
     click.echo(result.detail if result.ok else f"Error: {result.detail}", err=not result.ok)
     raise SystemExit(SUCCESS if result.ok else ERROR)
+
+
+@integrations.command(name="add-gke-clusters")
+@click.option(
+    "--project",
+    default="",
+    help="GCP project to scan. Omit for the default project, comma-separate several, or '*'.",
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Attach a tag to every cluster registered; repeatable (e.g. --tag env=prod).",
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Replace an existing instance whose name matches but points at another cluster.",
+)
+@click.option("--no-verify", is_flag=True, help="Skip the connectivity probe before saving.")
+@click.option("--dry-run", is_flag=True, help="Report what would be registered; change nothing.")
+def add_gke_clusters_command(
+    project: str, tags: tuple[str, ...], overwrite: bool, no_verify: bool, dry_run: bool
+) -> None:
+    """Discover GKE clusters in your GCP projects and register them for investigation.
+
+    Each cluster becomes a named Kubernetes instance the ``kubernetes_*`` tools
+    can target, so ``gcp_list_gke_clusters`` stops reporting it as unregistered.
+    Re-running is safe: clusters already registered are skipped.
+
+    The generated kubeconfig stores no credentials — it delegates to
+    ``gke-gcloud-auth-plugin``, which must be on PATH.
+    """
+    from integrations.catalog import resolve_effective_integrations
+    from integrations.gcp.gke import AUTH_PLUGIN, Outcome, plugin_installed, register_gke_clusters
+    from platform.common.exit_codes import ERROR, SUCCESS
+
+    try:
+        parsed_tags = _parse_tags(tags)
+    except ValueError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(ERROR) from exc
+
+    verify = not no_verify
+    if not plugin_installed():
+        # Without the plugin every kubeconfig written here is inert, so a probe
+        # would fail for a reason that has nothing to do with the cluster. Say
+        # so once, up front, instead of once per cluster.
+        message = (
+            f"'{AUTH_PLUGIN}' is not on PATH. Install it with: "
+            "gcloud components install gke-gcloud-auth-plugin"
+        )
+        if verify and not dry_run:
+            click.echo(f"Error: {message}", err=True)
+            raise SystemExit(ERROR)
+        click.echo(f"Warning: {message}", err=True)
+
+    report = register_gke_clusters(
+        resolved=resolve_effective_integrations(),
+        project=project,
+        tags=parsed_tags,
+        overwrite=overwrite,
+        verify=verify,
+        dry_run=dry_run,
+    )
+
+    for result in report.results:
+        marker = {Outcome.REGISTERED: "+", Outcome.SKIPPED: "=", Outcome.FAILED: "!"}[
+            result.outcome
+        ]
+        click.echo(
+            f"{marker} {result.cluster} ({result.project}) -> {result.instance}: {result.detail}"
+        )
+    for problem in report.errors:
+        click.echo(f"! {problem}", err=True)
+
+    if not report.results and not report.errors:
+        click.echo("No GKE clusters found in the configured projects.")
+
+    registered = report.count(Outcome.REGISTERED)
+    failed = report.count(Outcome.FAILED)
+    verb = "would register" if dry_run else "registered"
+    click.echo(f"{verb} {registered}, skipped {report.count(Outcome.SKIPPED)}, failed {failed}.")
+    raise SystemExit(ERROR if failed or report.errors else SUCCESS)

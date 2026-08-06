@@ -156,7 +156,7 @@ Lists GKE clusters across the configured projects, in every region and zone, wit
 
 - **`project`** — one project, a comma-separated list, or `*`
 
-Each cluster reports **`registered_as`** when a kubeconfig for it is registered with the [Kubernetes integration](/kubernetes) — that value is the name to pass as the `cluster` argument to `kubernetes_list_pods` and friends. Clusters without one are listed under `unregistered_clusters`: they are visible, but only through Cloud Logging and Monitoring until someone registers a kubeconfig.
+Each cluster reports **`registered_as`** when a kubeconfig for it is registered with the [Kubernetes integration](/kubernetes) — that value is the name to pass as the `cluster` argument to `kubernetes_list_pods` and friends. Clusters without one are listed under `unregistered_clusters`: they are visible, but only through Cloud Logging and Monitoring until someone registers a kubeconfig. [One command registers them all](#registering-your-gke-clusters-automatically).
 
 Matching is exact — either the registered kubeconfig `context` equals the one `gcloud container clusters get-credentials` writes (`gke_<project>_<location>_<cluster>`), or the registered instance name equals the cluster name. Nothing is matched by prefix, because two clusters called `prod` in different projects are ordinary.
 
@@ -178,6 +178,46 @@ Returns name, zone, machine type, status, creation time, internal and external I
 ### `gcp_list_projects`
 
 Lists the projects the agent may target. Returns the configured set, plus anything a live Resource Manager listing turns up when the credential has folder- or org-level visibility. A missing `resourcemanager.projects.list` permission is not an error — the configured set is still returned.
+
+## Registering your GKE clusters automatically
+
+Anything `gcp_list_gke_clusters` reports under `unregistered_clusters` is visible but unreachable — the `kubernetes_*` tools cannot run against it. One command fixes every one of them:
+
+```bash
+opensre integrations add-gke-clusters --project '*'
+```
+
+This discovers the clusters, generates a kubeconfig for each, and registers it under the [Kubernetes integration](/kubernetes), so `kubernetes_list_pods` and friends can target it by name. Re-running is safe — clusters already registered are skipped.
+
+**Requires [`gke-gcloud-auth-plugin`](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl) on PATH:**
+
+```bash
+gcloud components install gke-gcloud-auth-plugin
+```
+
+The generated kubeconfig **stores no credentials**. It holds the cluster endpoint, the cluster's public CA certificate, and an instruction to ask the plugin for a token at connection time.
+
+<Warning>
+The plugin authenticates as *its own* Application Default Credentials — on a workstation, whoever ran `gcloud auth login`, which is not necessarily the identity OpenSRE used to find the cluster. When `GCP_SERVICE_ACCOUNT_KEY` is a **file path**, the generated kubeconfig pins the plugin to that same file, so both sides match. When it is inline JSON there is nothing to pin, so set `GOOGLE_APPLICATION_CREDENTIALS` yourself.
+</Warning>
+
+| Option | What it does |
+|---|---|
+| `--project` | One project, a comma-separated list, or `*`. Omit for the default project. |
+| `--dry-run` | Report what would be registered; write nothing. |
+| `--tag KEY=VALUE` | Attach a tag to every cluster registered. Repeatable. |
+| `--overwrite` | Replace an existing instance whose name matches but points at another cluster. |
+| `--no-verify` | Skip the connectivity probe before saving. |
+
+Each cluster is registered under its own name and tagged `source=gke` plus its project and location. Two clusters sharing a name across projects both become `<cluster>-<project>`, so neither is ambiguous.
+
+If the endpoint and CA certificate come back empty, grant the principal `roles/container.clusterViewer` on top of `roles/container.viewer` — that is the permission that exposes them.
+
+<Note>
+Clusters with a **private endpoint only** are reachable from inside their VPC. Run the command from a host with VPC access, or use `--no-verify` to register them for later.
+</Note>
+
+Deploying in a container, where the local store is ephemeral? Declare the clusters in `KUBERNETES_INSTANCES` instead — see [Kubernetes](/kubernetes). `--dry-run` prints the names and contexts you need.
 
 ## Verify
 
@@ -230,13 +270,17 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | **Empty log results** | Cloud Logging filters are exact-match by default. Confirm the same filter returns rows in **Logs Explorer** over the same window, and remember the window comes from `hours`, not from a `timestamp` clause in the filter. |
 | **Nothing from `gcp_list_projects` beyond what you configured** | The credential lacks `resourcemanager.projects.list`. Harmless — configured projects still work. |
 | **`gcp_audit_log_query` returns nothing for `data_access`** | Data Access audit logs are disabled by default. Enable them per service in **IAM & Admin → Audit Logs**, or query `activity` instead. |
-| **A GKE cluster is listed but has no `registered_as`** | No kubeconfig is registered for it, so the `kubernetes_*` tools cannot reach it. Register one (see [Kubernetes](/kubernetes)) or investigate it through Cloud Logging and Monitoring. |
+| **A GKE cluster is listed but has no `registered_as`** | No kubeconfig is registered for it, so the `kubernetes_*` tools cannot reach it. Run `opensre integrations add-gke-clusters --project '*'`, or investigate it through Cloud Logging and Monitoring. |
+| **`add-gke-clusters` says the plugin is not on PATH** | Install it with `gcloud components install gke-gcloud-auth-plugin`. Without it the generated kubeconfig cannot obtain a token, so the command refuses to write one. |
+| **`add-gke-clusters` registers a cluster but `kubernetes_*` calls fail to authenticate** | The auth plugin is resolving different credentials than OpenSRE. Point `GOOGLE_APPLICATION_CREDENTIALS` at the same service-account key, or run `gcloud auth application-default login`. |
+| **`add-gke-clusters` reports "no endpoint or CA certificate"** | The principal can list clusters but not read their master config. Add `roles/container.clusterViewer`. |
 | **`partial_errors` on a multi-project listing** | One project denied the call while others answered; the results you got are real. The message names the project and the missing permission — usually `roles/container.viewer` or `roles/compute.viewer`. |
 | **`unreachable_locations` / `unreachable_scopes` in a result** | Google could not reach a zone, so the listing is incomplete. Re-run; if it persists, check the [GCP status dashboard](https://status.cloud.google.com/). |
 
 ## Security best practices
 
-- Grant only the viewer roles you need — `roles/logging.viewer`, `roles/monitoring.viewer`, and optionally `roles/container.viewer` and `roles/compute.viewer`. The integration is read-only and never writes to your projects.
+- Grant only the viewer roles you need — `roles/logging.viewer`, `roles/monitoring.viewer`, and optionally `roles/container.viewer`, `roles/container.clusterViewer` and `roles/compute.viewer`. The integration is read-only and never writes to your projects.
+- Kubeconfigs written by `add-gke-clusters` contain no secret — endpoint, public CA certificate, and a delegation to `gke-gcloud-auth-plugin`. Tokens are minted per connection and never stored.
 - Prefer **Workload Identity** or **impersonation** over service-account keys — neither creates a long-lived credential to rotate.
 - If you must use a key, mount it as a file and point `GCP_SERVICE_ACCOUNT_KEY` at the path rather than putting the JSON in an env var.
 - Scope the viewer role at the project level unless you genuinely want the whole folder readable; `GCP_ADDITIONAL_PROJECTS` decides what OpenSRE queries, but IAM decides what it *could*.
