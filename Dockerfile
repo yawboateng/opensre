@@ -63,9 +63,35 @@ COPY --from=gke-auth-plugin /usr/local/bin/gke-gcloud-auth-plugin /usr/local/bin
 
 COPY . /app
 
+# Dependencies come from uv.lock, not from the ranges in pyproject.toml.
+#
+# `pip install .` re-resolves every range at build time, so the image drifts away
+# from the versions CI tests the moment an upstream release lands — and it does so
+# silently, with no diff and no failing test. That is not hypothetical: an image
+# built this way resolved mcp 2.0.0 against a lock pinning 1.28.1, and the two
+# breaking changes in between (a transport yield arity, then `CallToolResult
+# .isError`) each surfaced as a runtime AttributeError in a deployed pod, on a
+# code path CI had exercised green minutes earlier.
+#
+# `uv export` flattens the lock to a pinned requirements file with hashes; pip
+# installs exactly that, then the project itself with --no-deps so nothing is
+# re-resolved behind it. uv is pinned too and uninstalled afterwards — it is a
+# build tool, not a runtime dependency.
+#
 # postgresql extra: psycopg2 for the DATABASE_URL-backed investigations store.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir ".[postgresql]"
+    && pip install --no-cache-dir "uv==0.12.1" \
+    && uv export \
+        --locked \
+        --no-dev \
+        --extra postgresql \
+        --no-emit-project \
+        --format requirements-txt \
+        -o /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip install --no-cache-dir --no-deps . \
+    && pip uninstall -y uv \
+    && rm -f /tmp/requirements.txt
 
 # Run as a non-root user (uid/gid 1000). /workspace is the writable runtime
 # working area owned by that user.
