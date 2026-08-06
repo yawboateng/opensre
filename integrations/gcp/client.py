@@ -34,6 +34,8 @@ CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 LOGGING_API = ("logging", "v2")
 MONITORING_API = ("monitoring", "v3")
 RESOURCE_MANAGER_API = ("cloudresourcemanager", "v1")
+CONTAINER_API = ("container", "v1")
+COMPUTE_API = ("compute", "v1")
 
 
 class GCPClientError(RuntimeError):

@@ -357,6 +357,68 @@ def _gcp_monitoring_case() -> ToolFailureCase:
     )
 
 
+def _gcp_audit_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_audit_log_query_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("audit")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_audit_log_query_tool import gcp_audit_log_query
+
+        return gcp_audit_log_query(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_audit_log_query",
+        patch,
+        invoke,
+        "gcp_audit_log_query",
+        "gcp",
+    )
+
+
+def _gcp_gke_clusters_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_list_gke_clusters_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("container")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_list_gke_clusters_tool import gcp_list_gke_clusters
+
+        return gcp_list_gke_clusters(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_list_gke_clusters",
+        patch,
+        invoke,
+        "gcp_list_gke_clusters",
+        "gcp",
+    )
+
+
+def _gcp_compute_instances_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_list_compute_instances_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("compute")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_list_compute_instances_tool import (
+            gcp_list_compute_instances,
+        )
+
+        return gcp_list_compute_instances(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_list_compute_instances",
+        patch,
+        invoke,
+        "gcp_list_compute_instances",
+        "gcp",
+    )
+
+
 def _eks_list_clusters_case() -> ToolFailureCase:
     def patch(mp: pytest.MonkeyPatch) -> None:
         import integrations.eks.tools as mod
@@ -840,6 +902,9 @@ _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _github_star_history_case(),
     _gcp_logging_case(),
     _gcp_monitoring_case(),
+    _gcp_audit_case(),
+    _gcp_gke_clusters_case(),
+    _gcp_compute_instances_case(),
     _eks_list_clusters_case(),
     _eks_describe_cluster_case(),
     _eks_nodegroup_case(),
@@ -1069,6 +1134,9 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "gcp_logging_query",
         "gcp_monitoring_query",
         "gcp_list_projects",
+        "gcp_audit_log_query",
+        "gcp_list_gke_clusters",
+        "gcp_list_compute_instances",
         # EKS — enumerated in #1463
         "list_eks_clusters",
         "describe_eks_cluster",

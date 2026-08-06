@@ -1,17 +1,19 @@
 ---
 title: "Google Cloud"
-description: "Connect Google Cloud so OpenSRE can read Cloud Logging and Cloud Monitoring during investigations, across one or many projects"
+description: "Connect Google Cloud so OpenSRE can read logs, metrics, audit trails, GKE clusters and VMs during investigations, across one or many projects"
 ---
 
-OpenSRE reads Cloud Logging entries and Cloud Monitoring time series from your Google Cloud projects — including GKE container logs and cluster metrics when no kubeconfig is registered.
+OpenSRE reads Cloud Logging entries, Cloud Monitoring time series, Cloud Audit Logs, GKE clusters and Compute Engine VMs from your Google Cloud projects — including GKE container logs and cluster metrics when no kubeconfig is registered.
 
 This is separate from running the agent's LLM on Vertex AI. `VERTEX_AI_PROJECT` selects the model; `GCP_PROJECT_ID` selects the infrastructure being investigated. Set both if they are different projects.
 
 ## Prerequisites
 
-- A Google Cloud project with the **Cloud Logging API**, **Cloud Monitoring API**, and **Cloud Resource Manager API** enabled
-- A principal with `roles/logging.viewer` and `roles/monitoring.viewer` on each project you want to query
-- Network access from the OpenSRE environment to `logging.googleapis.com`, `monitoring.googleapis.com`, and `cloudresourcemanager.googleapis.com`
+- A Google Cloud project with the **Cloud Logging API**, **Cloud Monitoring API**, and **Cloud Resource Manager API** enabled. Add the **Kubernetes Engine API** and **Compute Engine API** if you want GKE and VM inventory
+- A principal with `roles/logging.viewer` and `roles/monitoring.viewer` on each project you want to query. Add `roles/container.viewer` for GKE clusters and `roles/compute.viewer` for VMs
+- Network access from the OpenSRE environment to `logging.googleapis.com`, `monitoring.googleapis.com`, `cloudresourcemanager.googleapis.com`, and — for the inventory tools — `container.googleapis.com` and `compute.googleapis.com`
+
+Every API is optional except Cloud Logging. A missing role disables the tool that needs it; it does not break the rest.
 
 ## Setup
 
@@ -126,6 +128,53 @@ Reads Cloud Monitoring time series for **one** project per call (unlike logging,
 
 By default the aligner is chosen from the metric's kind: **mean** for gauges, **per-second rate** for counters. Cloud Monitoring rejects a mean over a cumulative metric outright, so a fixed aligner would fail on most counters. The aligner actually used is returned in the result — read rate values as per second, not as raw counts.
 
+### `gcp_audit_log_query`
+
+Answers *who changed what, and when* — the Cloud Audit Logs equivalent of reading CloudTrail. You give it named arguments, not a filter expression; it builds the query.
+
+- **`log_type`** — `activity` (admin writes, the default), `data_access`, `system_event`, `policy`, or `all`
+- **`project`** — one project, a comma-separated list, or `*`
+- **`principal`** — who acted, e.g. an email or service-account name (substring match)
+- **`method`** — the API method, e.g. `compute.instances.delete` or just `delete`
+- **`service`** — e.g. `compute.googleapis.com`
+- **`resource`** — the target resource name, e.g. a cluster or instance name
+- **`failed_only`** — only denied or errored calls
+- **`hours`** — lookback window, default `24`, capped at 30 days
+- **`limit`** — page size, default `GCP_MAX_RESULTS`
+
+Each result is one record: principal, method, service, resource, caller IP, user agent, and whether it succeeded. A denied call also lists the exact IAM permission that was missing, which usually turns "the deploy failed" into a one-line fix.
+
+<Note>
+**Data Access logs are off by default in GCP.** An empty `data_access` result almost always means nobody enabled the log type, not that nobody read anything. Admin writes — the changes that cause incidents — are in `activity`, which is always on.
+</Note>
+
+You can run the same query through `gcp_logging_query`, but only if you already know audit entries live under `logName:cloudaudit.googleapis.com` and that the interesting fields hang off `protoPayload`. Get either wrong and you get zero rows with no hint why.
+
+### `gcp_list_gke_clusters`
+
+Lists GKE clusters across the configured projects, in every region and zone, with control-plane status, master and node versions, node counts, node pools and autoscaling ranges.
+
+- **`project`** — one project, a comma-separated list, or `*`
+
+Each cluster reports **`registered_as`** when a kubeconfig for it is registered with the [Kubernetes integration](/kubernetes) — that value is the name to pass as the `cluster` argument to `kubernetes_list_pods` and friends. Clusters without one are listed under `unregistered_clusters`: they are visible, but only through Cloud Logging and Monitoring until someone registers a kubeconfig.
+
+Matching is exact — either the registered kubeconfig `context` equals the one `gcloud container clusters get-credentials` writes (`gke_<project>_<location>_<cluster>`), or the registered instance name equals the cluster name. Nothing is matched by prefix, because two clusters called `prod` in different projects are ordinary.
+
+`healthy` is `true` only for a `RUNNING` cluster with no conditions. A cluster can be `RUNNING` and still be reporting exhausted quota or a stuck upgrade, so read `conditions` rather than `status` alone.
+
+### `gcp_list_compute_instances`
+
+Lists Compute Engine VMs across the configured projects, covering every zone in one call per project.
+
+- **`project`** — one project, a comma-separated list, or `*`
+- **`status`** — e.g. `RUNNING` or `TERMINATED` (filtered server-side)
+- **`name_contains`** — substring of the instance name
+- **`limit`** — page size, default `100`, capped at `500`
+
+Returns name, zone, machine type, status, creation time, internal and external IP, labels and network tags. GKE nodes additionally report `gke_cluster` and `gke_node_pool`, so a VM named in an alert can be traced back to the cluster it belongs to. Preemptible and Spot VMs are flagged — their disappearance is expected behaviour, not an incident.
+
+`TERMINATED` means *stopped*, not deleted. A deleted instance is simply absent.
+
 ### `gcp_list_projects`
 
 Lists the projects the agent may target. Returns the configured set, plus anything a live Resource Manager listing turns up when the credential has folder- or org-level visibility. A missing `resourcemanager.projects.list` permission is not an error — the configured set is still returned.
@@ -159,10 +208,10 @@ Everything touching one request, across every configured project (`project="*"`)
 trace="projects/acme-prod/traces/0123456789abcdef0123456789abcdef"
 ```
 
-Who changed an IAM policy before the incident (Cloud Audit Logs):
+Who changed an IAM policy before the incident — use `gcp_audit_log_query` with `method="SetIamPolicy"` rather than writing this by hand, but the equivalent raw filter is:
 
 ```
-protoPayload.methodName="SetIamPolicy"
+logName:"cloudaudit.googleapis.com%2Factivity" AND protoPayload.methodName="SetIamPolicy"
 ```
 
 Container memory for a workload:
@@ -180,10 +229,14 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | **`The aligner cannot be applied to metrics with kind CUMULATIVE`** | Only happens with an explicit `aligner`. Drop it and let OpenSRE pick, or use `ALIGN_RATE`. |
 | **Empty log results** | Cloud Logging filters are exact-match by default. Confirm the same filter returns rows in **Logs Explorer** over the same window, and remember the window comes from `hours`, not from a `timestamp` clause in the filter. |
 | **Nothing from `gcp_list_projects` beyond what you configured** | The credential lacks `resourcemanager.projects.list`. Harmless — configured projects still work. |
+| **`gcp_audit_log_query` returns nothing for `data_access`** | Data Access audit logs are disabled by default. Enable them per service in **IAM & Admin → Audit Logs**, or query `activity` instead. |
+| **A GKE cluster is listed but has no `registered_as`** | No kubeconfig is registered for it, so the `kubernetes_*` tools cannot reach it. Register one (see [Kubernetes](/kubernetes)) or investigate it through Cloud Logging and Monitoring. |
+| **`partial_errors` on a multi-project listing** | One project denied the call while others answered; the results you got are real. The message names the project and the missing permission — usually `roles/container.viewer` or `roles/compute.viewer`. |
+| **`unreachable_locations` / `unreachable_scopes` in a result** | Google could not reach a zone, so the listing is incomplete. Re-run; if it persists, check the [GCP status dashboard](https://status.cloud.google.com/). |
 
 ## Security best practices
 
-- Grant only `roles/logging.viewer` and `roles/monitoring.viewer`. The integration is read-only and never writes to your projects.
+- Grant only the viewer roles you need — `roles/logging.viewer`, `roles/monitoring.viewer`, and optionally `roles/container.viewer` and `roles/compute.viewer`. The integration is read-only and never writes to your projects.
 - Prefer **Workload Identity** or **impersonation** over service-account keys — neither creates a long-lived credential to rotate.
 - If you must use a key, mount it as a file and point `GCP_SERVICE_ACCOUNT_KEY` at the path rather than putting the JSON in an env var.
 - Scope the viewer role at the project level unless you genuinely want the whole folder readable; `GCP_ADDITIONAL_PROJECTS` decides what OpenSRE queries, but IAM decides what it *could*.
