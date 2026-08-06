@@ -37,6 +37,9 @@ def _resolved() -> dict[str, Any]:
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(GCP_AUTO_REGISTER_GKE_ENV, raising=False)
     monkeypatch.delenv(KUBERNETES_INSTANCES_ENV, raising=False)
+    # The once-per-process guard is module state, so without this the first test
+    # to start a thread would silently suppress every later one.
+    monkeypatch.setattr(autoregister, "_started_thread", None)
 
 
 @pytest.fixture
@@ -231,3 +234,45 @@ def test_opting_in_starts_a_daemon_thread(
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert _ready.calls[0]["project"] == "*"
+
+
+def test_a_second_call_reuses_the_first_thread_instead_of_rediscovering(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """Two entry points call in, and the gateway process reaches both.
+
+    ``gateway.runtime.startup`` calls it directly, and importing
+    ``gateway.http.webapp`` calls it at module scope — which the gateway also
+    does, via ``serve_webapp_in_thread``. Registration is idempotent, so the
+    duplicate was harmless in outcome, but it was a second full round of cluster
+    discovery for an answer already known, and it logged a bogus second summary.
+    """
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    logger = logging.getLogger(__name__)
+
+    first = autoregister.start_gke_autoregistration(logger)
+    assert first is not None
+    first.join(timeout=5)
+
+    second = autoregister.start_gke_autoregistration(logger)
+
+    assert second is first
+    assert len(_ready.calls) == 1, _ready.calls
+
+
+def test_opting_out_is_decided_before_the_once_guard(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """Turning it off must not be sticky in the other direction either.
+
+    The guard remembers a thread, not a decision, so a call made while opted out
+    records nothing and a later opt-in still runs.
+    """
+    assert autoregister.start_gke_autoregistration(logging.getLogger(__name__)) is None
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    thread = autoregister.start_gke_autoregistration(logging.getLogger(__name__))
+
+    assert thread is not None
+    thread.join(timeout=5)
+    assert len(_ready.calls) == 1, _ready.calls

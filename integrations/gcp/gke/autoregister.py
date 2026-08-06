@@ -57,6 +57,15 @@ _AUTO_TAG = "auto_registered"
 
 _THREAD_NAME = "opensre-gke-autoregister"
 
+#: The one run this process gets, and the lock that makes "check then start"
+#: atomic. Two entry points call in — ``gateway.runtime.startup`` and the import
+#: of ``gateway.http.webapp`` — and the gateway process hits *both*, because it
+#: serves the web app in a thread (``serve_webapp_in_thread``). Neither caller
+#: can know about the other, so the invariant "one registration per process"
+#: belongs here rather than in a guard each of them repeats.
+_started_thread: threading.Thread | None = None
+_start_lock = threading.Lock()
+
 
 def requested_projects() -> str | None:
     """Return the project selector to register, or ``None`` when opted out.
@@ -81,18 +90,29 @@ def start_gke_autoregistration(logger: logging.Logger) -> threading.Thread | Non
     ``None`` means the operator did not opt in, which is the default and not a
     failure. Callers should not join the thread: it exists precisely so that
     boot does not wait on Google.
+
+    Safe to call more than once: the second and later calls return the thread the
+    first one started without repeating the work. Registration is idempotent, so
+    a duplicate run is harmless in *outcome* — but it is a full round of cluster
+    discovery against ``container.googleapis.com`` for a result that is already
+    known, and it makes the boot log read as though something changed twice.
     """
+    global _started_thread
+
     selector = requested_projects()
     if selector is None:
         return None
-    thread = threading.Thread(
-        target=_run,
-        args=(logger, selector),
-        name=_THREAD_NAME,
-        daemon=True,
-    )
-    thread.start()
-    return thread
+    with _start_lock:
+        if _started_thread is not None:
+            return _started_thread
+        _started_thread = threading.Thread(
+            target=_run,
+            args=(logger, selector),
+            name=_THREAD_NAME,
+            daemon=True,
+        )
+        _started_thread.start()
+        return _started_thread
 
 
 def _run(logger: logging.Logger, selector: str) -> None:
