@@ -128,6 +128,20 @@ OpenSRE calls `kubernetes_list_clusters` to see `gke-dev` and `gke-prod`, then
 calls the other tools with `cluster="gke-dev"` and `cluster="gke-prod"` to reach
 each one.
 
+### Finding GKE clusters you have not registered
+
+`kubernetes_list_clusters` only knows about clusters someone registered here. If
+the [Google Cloud integration](/gcp) is configured, `gcp_list_gke_clusters` asks
+GCP instead and lists every cluster in your projects, saying for each one whether
+a kubeconfig is registered (`registered_as`) or not. That is how an investigation
+notices a cluster nobody added — and the name it reports is the one to pass as
+`cluster` once you register it.
+
+The match is on the kubeconfig `context`: register the cluster with the context
+`gcloud container clusters get-credentials` writes
+(`gke_<project>_<location>_<cluster>`), or name the entry after the cluster
+itself, and the two sides line up automatically.
+
 ## Configuration reference
 
 | Field | Environment variable | Default | Description |
