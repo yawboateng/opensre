@@ -33,11 +33,29 @@ Each platform guide walks you through:
 
 ---
 
+## Name the bot
+
+If you renamed the bot on the platform, tell OpenSRE too:
+
+```bash
+OPENSRE_AGENT_NAME=YourBotName
+```
+
+Without it the agent still greets people as "OpenSRE" no matter what the app is
+called, and a thread reply that uses the bot's real name — with no `@mention` —
+is read as human chatter and goes unanswered. One name covers every surface the
+gateway serves. The `opensre` CLI and these docs are unaffected. Full detail:
+[Environment variables](/configuration/environment-variables#agent-identity).
+
 ## Common environment variables
 
 Discord and Telegram credentials can also be set directly in `.env` instead of (or alongside) the CLI configuration:
 
 ```bash
+# Agent name in chat (defaults to OpenSRE)
+OPENSRE_AGENT_NAME=
+
+
 # Slack — webhook delivery and/or Socket Mode gateway
 SLACK_WEBHOOK_URL=
 SLACK_BOT_TOKEN=

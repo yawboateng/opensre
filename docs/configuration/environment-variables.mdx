@@ -136,6 +136,23 @@ All configuration options for OpenSRE can be set via environment variables. This
 | `PI_AGENT_DIR` | | Pi agent config directory override | `integrations/llm_cli` |
 | `PI_CONFIG_DIR` | | Pi config directory override | `integrations/llm_cli` |
 
+## Agent Identity
+
+| Variable | Default | Description | Module |
+|----------|---------|-------------|--------|
+| `OPENSRE_AGENT_NAME` | `OpenSRE` | Name the agent goes by in chat and in the terminal | `config/constants/agent_identity` |
+
+Set it to whatever your Slack, Discord, or Telegram bot is called. It changes
+how the agent introduces itself, the name in the Slack reply footer, and the
+wake word that lets a thread reply reach the bot without an `@mention`. It does
+**not** rename the product: the `opensre` CLI, its commands, and these docs stay
+OpenSRE.
+
+The name is not read from the chat platform. A Slack bot user's profile keeps
+its old name until the app is reinstalled, so auto-detection would confidently
+report a stale one — and a single gateway process can serve Slack, Discord, and
+Telegram at the same time, each with its own platform-side name.
+
 ## Output & Debugging
 
 | Variable | Default | Description | Module |

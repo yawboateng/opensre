@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from config.constants.agent_identity import AGENT_NAME_ENV
 from gateway.transports.slack.output_sink import (
     SLACK_MAX_MARKDOWN_BLOCK_CHARS,
     SLACK_MAX_MESSAGE_CHARS,
@@ -172,7 +175,22 @@ def test_finalize_appends_provenance_footer() -> None:
     footer = next(b for b in client.updates[-1]["blocks"] if b["type"] == "context")
     footer_text = footer["elements"][0]["text"]
     assert "OpenSRE" in footer_text
-    assert "AI-generated" in footer_text
+    assert "AI-generated — verify key details" in footer_text
+
+
+def test_the_footer_signs_with_the_deployments_own_agent_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(AGENT_NAME_ENV, "AcmeOps")
+    client = _FakeMessagingClient()
+    sink = _sink(client)
+
+    sink.finalize("answer")
+
+    footer = next(b for b in client.updates[-1]["blocks"] if b["type"] == "context")
+    footer_text = footer["elements"][0]["text"]
+    assert footer_text.startswith("AcmeOps · AI-generated — verify key details · ")
+    assert "OpenSRE" not in footer_text
 
 
 def test_finalize_appends_feedback_buttons_after_footer() -> None:
