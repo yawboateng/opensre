@@ -223,6 +223,25 @@ def test_draft_is_forwarded_to_github(client: _FakeClient) -> None:
     assert client.bodies("POST", "/pulls")[0]["draft"] is True
 
 
+def test_pull_requests_are_ready_for_review_unless_asked_otherwise(client: _FakeClient) -> None:
+    """Required status checks never run on a draft, so the PR arrives unverified."""
+    # Act
+    _call()
+
+    # Assert
+    assert client.bodies("POST", "/pulls")[0]["draft"] is False
+
+
+def test_the_draft_field_tells_the_model_why_to_leave_it_alone() -> None:
+    """The default is already false; a model that picks draft anyway needs the reason."""
+    # Arrange
+    schema = _registered_tool().input_schema
+
+    # Assert
+    assert "draft" not in schema["required"]
+    assert "checks" in schema["properties"]["draft"]["description"]
+
+
 def test_head_branch_equal_to_base_is_refused_before_any_write(client: _FakeClient) -> None:
     """The guard that keeps the tool off the base branch."""
     # Act

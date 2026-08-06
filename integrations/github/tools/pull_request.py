@@ -49,6 +49,10 @@ _DIFF_ANTI_EXAMPLE = (
 )
 _MERGE_ANTI_EXAMPLE = "Merging, approving, or closing a pull request (this tool only opens one)"
 _BINARY_ANTI_EXAMPLE = "Committing binary files such as images or archives (UTF-8 text only)"
+_DRAFT_ANTI_EXAMPLE = (
+    "Opening the pull request as a draft when nobody asked for one (required "
+    "status checks do not run on drafts, so the PR looks unverified)"
+)
 
 
 def _pull_request_available(sources: dict[str, dict]) -> bool:
@@ -127,6 +131,7 @@ def _failure(kind: str, message: str, *, branch: str = "", branch_created: bool 
         _DIFF_ANTI_EXAMPLE,
         _MERGE_ANTI_EXAMPLE,
         _BINARY_ANTI_EXAMPLE,
+        _DRAFT_ANTI_EXAMPLE,
         "Pushing straight to main or any protected branch",
     ],
     requires=["owner", "repo"],
@@ -166,7 +171,13 @@ def _failure(kind: str, message: str, *, branch: str = "", branch_created: bool 
             },
             "draft": {
                 "type": "boolean",
-                "description": "Open the pull request as a draft. Defaults to false.",
+                "description": (
+                    "Open the pull request as a draft. Defaults to false, and should stay "
+                    "false unless the user explicitly asked for a draft: required status "
+                    "checks and CI gates do not run on draft pull requests, so the change "
+                    "arrives looking unverified and cannot be merged until someone marks "
+                    "it ready."
+                ),
             },
             "changes": {
                 "type": "array",
