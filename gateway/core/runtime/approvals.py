@@ -14,15 +14,17 @@ Kit in ``gateway.transports.slack.approvals``, message components in
 
 from __future__ import annotations
 
-import json
+import logging
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from core.execution import BeforeToolCallResult, ToolExecutionHooks, ToolExecutionRequest
 from gateway.core.runtime.security_audit import audit_security_action
+
+logger = logging.getLogger("gateway")
 
 APPROVE_ACTION_ID = "opensre_approval_approve"
 DENY_ACTION_ID = "opensre_approval_deny"
@@ -30,8 +32,33 @@ DENY_ACTION_ID = "opensre_approval_deny"
 # Never let one approval outlive the turn timeout (240s default): a prompt
 # nobody answers should resolve to deny while the turn can still say so.
 MAX_APPROVAL_WAIT_SECONDS = 180.0
-# Longest argument preview rendered into an approval prompt.
-ARGS_PREVIEW_LIMIT = 400
+
+# Longest argument preview rendered into an approval prompt. Slack allows 3000
+# characters per section and Discord 2000 per message, both counting the prompt
+# text and the code fence around this, so Discord sets the ceiling.
+ARGS_PREVIEW_LIMIT = 1400
+
+# Argument-rendering limits. A value longer than this is reported by length
+# instead of pasted; a list longer than this shows a count for the remainder.
+_VALUE_LIMIT = 160
+_INLINE_STRING_LIMIT = 40
+_LIST_ITEM_LIMIT = 8
+
+# Keys tried in order to label one entry of a list of objects.
+_ITEM_LABEL_KEYS = ("path", "name", "id", "key", "title")
+
+# Values under keys containing any of these are replaced before display.
+_SECRET_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "api_key",
+    "apikey",
+    "auth",
+)
+_REDACTED = "••••"
 
 
 @dataclass
@@ -158,17 +185,108 @@ def approval_tool_hooks(prompter: ApprovalPrompter) -> ToolExecutionHooks:
     return ToolExecutionHooks(before_tool_call=before_tool_call)
 
 
+def _is_secret_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(part in lowered for part in _SECRET_KEY_PARTS)
+
+
+def _one_line(value: Any) -> str:
+    return " ".join(str(value).split())
+
+
+def _scalar(value: Any) -> str:
+    """One argument value, summarised by length rather than cut mid-word."""
+    text = _one_line(value)
+    if len(text) <= _VALUE_LIMIT:
+        return text
+    return f"{text[:_VALUE_LIMIT]}… ({len(text)} chars)"
+
+
+def _item_detail(item: Mapping[str, Any], *, label_key: str) -> str:
+    """The non-label fields of a list entry, as ``[delete=True]`` style notes.
+
+    Long strings are reported by length. A file's whole new contents are the
+    reason this exists: the reviewer needs to know a path is being rewritten
+    and roughly how much, not to read four kilobytes in a chat message.
+    """
+    notes: list[str] = []
+    for key, value in item.items():
+        if key == label_key:
+            continue
+        if _is_secret_key(str(key)):
+            notes.append(f"{key}={_REDACTED}")
+        elif isinstance(value, str) and len(value) > _INLINE_STRING_LIMIT:
+            notes.append(f"{key} {len(value)} chars")
+        else:
+            notes.append(f"{key}={_one_line(value)}")
+    return f"  [{', '.join(notes)}]" if notes else ""
+
+
+def _item_line(item: Any) -> str:
+    if not isinstance(item, Mapping):
+        return _scalar(item)
+    for key in _ITEM_LABEL_KEYS:
+        label = item.get(key)
+        if label is not None and str(label).strip():
+            return f"{_one_line(label)}{_item_detail(item, label_key=key)}"
+    return _one_line(", ".join(f"{k}={v}" for k, v in item.items()))[:_VALUE_LIMIT]
+
+
+def _sequence_lines(key: str, value: Sequence[Any]) -> list[str]:
+    count = len(value)
+    if not count:
+        return [f"{key}: (none)"]
+    lines = [f"{key}: {count} {'item' if count == 1 else 'items'}"]
+    lines.extend(f"  · {_item_line(item)}" for item in value[:_LIST_ITEM_LIMIT])
+    if count > _LIST_ITEM_LIMIT:
+        lines.append(f"  · … and {count - _LIST_ITEM_LIMIT} more")
+    return lines
+
+
+def _argument_lines(key: str, value: Any) -> list[str]:
+    if _is_secret_key(key):
+        return [f"{key}: {_REDACTED}"]
+    if isinstance(value, (list, tuple)):
+        return _sequence_lines(key, value)
+    if isinstance(value, Mapping):
+        if not value:
+            return [f"{key}: (empty)"]
+        return [f"{key}: {len(value)} fields ({', '.join(_one_line(k) for k in value)})"]
+    return [f"{key}: {_scalar(value)}"]
+
+
 def arguments_preview(arguments: Mapping[str, Any]) -> str:
-    """Render tool arguments for a prompt, truncated to a readable length."""
+    """Render tool arguments as a readable summary of what the call will do.
+
+    One field per line, values summarised rather than dumped: a long body is
+    reported by length, and a list gets a bullet per entry keyed on whichever
+    of ``path``/``name``/``id`` it carries. JSON was the previous format and it
+    failed the one job this has — the interesting field is usually last, so a
+    length cap ate exactly the part the reviewer needed to see.
+
+    Arguments here are model-supplied (credentials are injected downstream, in
+    ``core.execution``), but a model may pass an explicit token override, so
+    secret-looking keys are still redacted before this reaches a channel.
+    """
     if not arguments:
         return ""
     try:
-        preview = json.dumps(dict(arguments), ensure_ascii=False, default=str)
-    except Exception:
-        preview = str(dict(arguments))
-    if len(preview) > ARGS_PREVIEW_LIMIT:
-        preview = preview[: ARGS_PREVIEW_LIMIT - 1] + "…"
-    return preview
+        lines = [
+            line for key, value in arguments.items() for line in _argument_lines(str(key), value)
+        ]
+    except Exception:  # pragma: no cover - defensive: never block a write on rendering
+        logger.warning("approval preview rendering failed", exc_info=True)
+        return "(arguments could not be rendered; see server logs)"
+
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        if used + len(line) + 1 > ARGS_PREVIEW_LIMIT:
+            kept.append(f"… {len(lines) - index} more line(s) not shown")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
 
 
 __all__ = [

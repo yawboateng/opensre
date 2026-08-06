@@ -44,7 +44,10 @@ contents.
 **Every call asks a human first.** The interactive shell prompts
 `Proceed? [Y/n]`; Slack and Discord post **Approve** / **Deny** buttons and the
 call blocks until someone clicks or the request expires (3 minutes). Nothing is
-written to GitHub before that.
+written to GitHub before that. The prompt lists the repository, both branches,
+the title, and every file the commit touches, so you can see the blast radius
+without leaving the thread — file contents are reported by size rather than
+pasted, and anything under a token- or password-shaped key is redacted.
 
 What it will and will not do:
 
