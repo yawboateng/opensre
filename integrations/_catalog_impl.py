@@ -225,7 +225,11 @@ from integrations.datadog import classify as _classify_datadog
 from integrations.discord import classify as _classify_discord
 from integrations.effective_models import EffectiveIntegrations
 from integrations.gcp import classify as _classify_gcp
-from integrations.github.mcp import build_github_mcp_config
+from integrations.github.mcp import (
+    DEFAULT_GITHUB_MCP_URL,
+    build_github_mcp_config,
+    github_mcp_env_is_configured,
+)
 from integrations.github.mcp import classify as _classify_github
 from integrations.gitlab import DEFAULT_GITLAB_BASE_URL, build_gitlab_config
 from integrations.gitlab import classify as _classify_gitlab
@@ -835,10 +839,17 @@ def load_env_integrations() -> list[dict[str, Any]]:
     github_args = os.getenv(GITHUB_MCP_ARGS_ENV, "").strip()
     github_auth_token = resolve_env_credential(GITHUB_MCP_AUTH_TOKEN_ENV)
     github_toolsets = os.getenv(GITHUB_MCP_TOOLSETS_ENV, "").strip()
-    if (github_mode == "stdio" and github_command) or (github_mode != "stdio" and github_url):
+    if github_mcp_env_is_configured(
+        mode=github_mode,
+        url=github_url,
+        command=github_command,
+        auth_token=github_auth_token,
+    ):
         github_config = build_github_mcp_config(
             {
-                "url": github_url,
+                # A token with no URL means GitHub's hosted server, which is
+                # what the docs advertise as the default.
+                "url": github_url or DEFAULT_GITHUB_MCP_URL,
                 "mode": github_mode,
                 "command": github_command,
                 "args": [part for part in github_args.split() if part],
