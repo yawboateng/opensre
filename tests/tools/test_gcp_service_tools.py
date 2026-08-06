@@ -1052,12 +1052,31 @@ def test_normalize_group_parses_string_encoded_counts() -> None:
 
 
 class _FakeGroupStats:
+    # The signature is spelled out rather than taking **kwargs on purpose.
+    # googleapiclient renames dotted REST query params with an underscore, so a
+    # permissive fake happily accepts `timeRange.period` and the tool only fails
+    # against the real API. Keeping the names exact makes that a test failure.
     def __init__(self, calls: list[dict[str, Any]], pages: list[dict[str, Any]]) -> None:
         self._calls = calls
         self._pages = pages
 
-    def list(self, **kwargs: Any) -> _FakeGroupStats:
-        self._calls.append(kwargs)
+    def list(
+        self,
+        projectName: str,  # noqa: N803
+        pageSize: int,  # noqa: N803
+        order: str,
+        timeRange_period: str,  # noqa: N803
+        serviceFilter_service: str | None,  # noqa: N803
+    ) -> _FakeGroupStats:
+        self._calls.append(
+            {
+                "projectName": projectName,
+                "pageSize": pageSize,
+                "order": order,
+                "timeRange_period": timeRange_period,
+                "serviceFilter_service": serviceFilter_service,
+            }
+        )
         return self
 
     def execute(self) -> dict[str, Any]:
@@ -1080,8 +1099,15 @@ class _RaisingGroupStats:
         self._failing = failing_project
         self._project = ""
 
-    def list(self, **kwargs: Any) -> _RaisingGroupStats:
-        self._project = str(kwargs.get("projectName", ""))
+    def list(
+        self,
+        projectName: str,  # noqa: N803
+        pageSize: int,  # noqa: N803, ARG002
+        order: str,  # noqa: ARG002
+        timeRange_period: str,  # noqa: N803, ARG002
+        serviceFilter_service: str | None,  # noqa: N803, ARG002
+    ) -> _RaisingGroupStats:
+        self._project = projectName
         return self
 
     def execute(self) -> dict[str, Any]:
@@ -1143,9 +1169,9 @@ def test_error_reporting_tool_maps_friendly_values_to_api_enums(
         project_configs={"acme": _ONE_CREDENTIAL},
     )
 
-    assert calls[0]["timeRange.period"] == "PERIOD_6_HOURS"
+    assert calls[0]["timeRange_period"] == "PERIOD_6_HOURS"
     assert calls[0]["order"] == "CREATED_DESC"
-    assert calls[0]["serviceFilter.service"] == "checkout"
+    assert calls[0]["serviceFilter_service"] == "checkout"
 
 
 def test_error_reporting_tool_sends_no_service_filter_when_unfiltered(
@@ -1160,7 +1186,7 @@ def test_error_reporting_tool_sends_no_service_filter_when_unfiltered(
         project_configs={"acme": _ONE_CREDENTIAL},
     )
 
-    assert calls[0]["serviceFilter.service"] is None
+    assert calls[0]["serviceFilter_service"] is None
 
 
 def test_error_reporting_tool_reranks_a_merged_result_on_the_requested_order(

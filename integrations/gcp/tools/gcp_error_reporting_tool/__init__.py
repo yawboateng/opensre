@@ -90,16 +90,22 @@ def _ranking_key(ranking: str) -> Any:
 def _fetch(
     service: Any, project: str, period: str, order: str, page_size: int, service_filter: str
 ) -> dict[str, Any]:
-    """Run one ``groupStats.list`` call for a project."""
+    """Run one ``groupStats.list`` call for a project.
+
+    The REST query params are ``timeRange.period`` and
+    ``serviceFilter.service``, but ``googleapiclient`` builds its Python
+    signatures by replacing the dot with an underscore. Passing the dotted
+    names raises ``TypeError: Got an unexpected keyword argument`` before any
+    request goes out — the same convention the monitoring tool follows with
+    ``interval_startTime``.
+    """
     request = service.projects().groupStats()
     payload: dict[str, Any] = request.list(
         projectName=f"projects/{project}",
         pageSize=page_size,
         order=order,
-        **{
-            "timeRange.period": period,
-            "serviceFilter.service": service_filter or None,
-        },
+        timeRange_period=period,
+        serviceFilter_service=service_filter or None,
     ).execute()
     return payload
 
