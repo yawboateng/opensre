@@ -36,6 +36,10 @@ MONITORING_API = ("monitoring", "v3")
 RESOURCE_MANAGER_API = ("cloudresourcemanager", "v1")
 CONTAINER_API = ("container", "v1")
 COMPUTE_API = ("compute", "v1")
+CLOUD_RUN_API = ("run", "v2")
+CLOUD_SQL_API = ("sqladmin", "v1")
+PUBSUB_API = ("pubsub", "v1")
+ERROR_REPORTING_API = ("clouderrorreporting", "v1beta1")
 
 
 class GCPClientError(RuntimeError):

@@ -1,19 +1,30 @@
 ---
 title: "Google Cloud"
-description: "Connect Google Cloud so OpenSRE can read logs, metrics, audit trails, GKE clusters and VMs during investigations, across one or many projects"
+description: "Connect Google Cloud so OpenSRE can read logs, metrics, audit trails, GKE clusters, VMs, Cloud Run, Cloud SQL, Pub/Sub and Error Reporting during investigations, across one or many projects"
 ---
 
-OpenSRE reads Cloud Logging entries, Cloud Monitoring time series, Cloud Audit Logs, GKE clusters and Compute Engine VMs from your Google Cloud projects — including GKE container logs and cluster metrics when no kubeconfig is registered.
+OpenSRE reads Cloud Logging entries, Cloud Monitoring time series, Cloud Audit Logs, GKE clusters, Compute Engine VMs, Cloud Run services, Cloud SQL instances, Pub/Sub backlogs and Error Reporting groups from your Google Cloud projects — including GKE container logs and cluster metrics when no kubeconfig is registered.
 
 This is separate from running the agent's LLM on Vertex AI. `VERTEX_AI_PROJECT` selects the model; `GCP_PROJECT_ID` selects the infrastructure being investigated. Set both if they are different projects.
 
 ## Prerequisites
 
-- A Google Cloud project with the **Cloud Logging API**, **Cloud Monitoring API**, and **Cloud Resource Manager API** enabled. Add the **Kubernetes Engine API** and **Compute Engine API** if you want GKE and VM inventory
-- A principal with `roles/logging.viewer` and `roles/monitoring.viewer` on each project you want to query. Add `roles/container.viewer` for GKE clusters and `roles/compute.viewer` for VMs
-- Network access from the OpenSRE environment to `logging.googleapis.com`, `monitoring.googleapis.com`, `cloudresourcemanager.googleapis.com`, and — for the inventory tools — `container.googleapis.com` and `compute.googleapis.com`
+- A Google Cloud project with the **Cloud Logging API**, **Cloud Monitoring API**, and **Cloud Resource Manager API** enabled
+- A principal with `roles/logging.viewer` and `roles/monitoring.viewer` on each project you want to query
+- Network access from the OpenSRE environment to `logging.googleapis.com`, `monitoring.googleapis.com` and `cloudresourcemanager.googleapis.com`
 
-Every API is optional except Cloud Logging. A missing role disables the tool that needs it; it does not break the rest.
+Everything else is opt-in, one service at a time. Enable the API and grant the role only for the tools you want:
+
+| Tool | API to enable | Role to grant | Endpoint to reach |
+| --- | --- | --- | --- |
+| `gcp_list_gke_clusters` | Kubernetes Engine | `roles/container.viewer` | `container.googleapis.com` |
+| `gcp_list_compute_instances` | Compute Engine | `roles/compute.viewer` | `compute.googleapis.com` |
+| `gcp_list_cloud_run_services` | Cloud Run Admin | `roles/run.viewer` | `run.googleapis.com` |
+| `gcp_list_cloud_sql_instances` | Cloud SQL Admin | `roles/cloudsql.viewer` | `sqladmin.googleapis.com` |
+| `gcp_pubsub_backlog` | Cloud Pub/Sub | `roles/pubsub.viewer` **and** `roles/monitoring.viewer` | `pubsub.googleapis.com` |
+| `gcp_error_reporting_top_errors` | Error Reporting | `roles/errorreporting.viewer` | `clouderrorreporting.googleapis.com` |
+
+A missing API or role disables the tool that needs it; it does not break the rest. On a multi-project query, a project that denies one call is reported in `partial_errors` and the projects that answered are still returned.
 
 ## Setup
 
@@ -175,6 +186,74 @@ Returns name, zone, machine type, status, creation time, internal and external I
 
 `TERMINATED` means *stopped*, not deleted. A deleted instance is simply absent.
 
+### `gcp_list_cloud_run_services`
+
+Lists Cloud Run services across the configured projects, covering every region in one call per project.
+
+- **`project`** — one project, a comma-separated list, or `*`
+- **`name_contains`** — substring of the service name
+- **`unhealthy_only`** — only services that are not `Ready` or whose latest revision never took traffic
+- **`limit`** — page size, default `100`, capped at `500`
+
+Returns readiness, the revision actually serving traffic, the container images it runs, the live traffic split, ingress setting, scaling bounds, who deployed last and any failing condition.
+
+<Note>
+**A Cloud Run deploy that changed nothing looks healthy.** When a new revision never becomes ready, Cloud Run keeps serving the previous one and the service still reports `Ready`. That shows up here as `latest_created_revision` ≠ `latest_ready_revision`, flagged as `rollout_pending`. Read `failing_conditions` on those services — that is where the pull error, crash-on-start or missing secret is named.
+</Note>
+
+Do not pass a region: the tool already queries all of them.
+
+### `gcp_list_cloud_sql_instances`
+
+Lists Cloud SQL database instances across the configured projects, covering every region in one call per project.
+
+- **`project`** — one project, a comma-separated list, or `*`
+- **`state`** — e.g. `RUNNABLE`, `SUSPENDED`, `MAINTENANCE`, `FAILED` (filtered server-side)
+- **`name_contains`** — substring of the instance name
+- **`unhealthy_only`** — only instances that are not `RUNNABLE` or are near their disk limit
+- **`limit`** — page size, default `100`, capped at `500`
+
+Returns state, database version, region and zone, tier, availability type, disk usage, replica topology, connection name, whether backups are on, scheduled maintenance and suspension reasons.
+
+`healthy` is `true` only for a `RUNNABLE` instance that is not near its disk limit. **An instance that fills its disk stops accepting writes and still reports `RUNNABLE`**, so `state` alone will not show it — instances above 85% of provisioned disk are flagged `disk_pressure`.
+
+`accepts_writes` is `false` on a read replica, and `replica_of` names the primary. That pair answers "why are writes failing but reads fine" without a round trip. `availability_type: ZONAL` means there is no standby, so a zone outage is an outage rather than a failover.
+
+### `gcp_pubsub_backlog`
+
+Lists Pub/Sub subscriptions with their current backlog, joining the subscription configuration to the two Cloud Monitoring metrics that say whether consumers are keeping up.
+
+- **`project`** — one project, a comma-separated list, or `*`
+- **`name_contains`** — substring of the subscription name **or** its topic
+- **`backlogged_only`** — only subscriptions with undelivered messages or a stalled oldest message
+- **`limit`** — page size, default `100`, capped at `500`
+
+Returns `undelivered_messages` and `oldest_unacked_age_seconds` alongside the topic, delivery mode, push endpoint, ack deadline, retry backoff and dead-letter policy. Results are sorted deepest backlog first.
+
+`oldest_unacked_age_seconds` is the field to read, not the count. A batch subscription can sit thousands deep by design; a *rising age* means consumers stopped. Anything over five minutes is flagged `stalled`.
+
+Two subscription details explain most backlogs that will not drain on their own: a **push** subscription whose endpoint is 5xx-ing has no consumer to inspect, and a subscription with an empty `dead_letter_topic` retries a poison message forever.
+
+<Note>
+This tool needs **two** roles. With `roles/pubsub.viewer` but not `roles/monitoring.viewer`, the configuration is still returned and every subscription is marked `backlog_unknown` — deliberately, so an unreadable metric never renders as a healthy zero.
+</Note>
+
+### `gcp_error_reporting_top_errors`
+
+Lists the top error groups from Error Reporting, already deduplicated server-side. The shortest path from "something is wrong" to a stack trace.
+
+- **`project`** — one project, a comma-separated list, or `*`
+- **`period`** — `1h` (default), `6h`, `1d`, `1w`, or `30d`
+- **`order`** — `count` (default), `last_seen`, `first_seen`, or `affected_users`
+- **`service`** — only groups raised by this service name
+- **`limit`** — groups returned, default `20`, capped at `100`
+
+Each group carries its count, users affected, when it was first and last seen, the service and version that raised it, and a representative stack trace truncated to its leading frames.
+
+**`first_seen` is what makes this worth a tool call.** A group first seen twenty minutes ago is a regression; a group first seen eight months ago is background noise with the same count. Use `order="first_seen"` to surface groups that appeared during the incident.
+
+An empty result does not mean nothing is failing. Error Reporting only sees exceptions that reach it — a service logging errors as plain text without a stack trace reports nothing here. Fall back to `gcp_logging_query` with `severity=ERROR`.
+
 ### `gcp_list_projects`
 
 Lists the projects the agent may target. Returns the configured set, plus anything a live Resource Manager listing turns up when the credential has folder- or org-level visibility. A missing `resourcemanager.projects.list` permission is not an error — the configured set is still returned.
@@ -274,12 +353,18 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | **`add-gke-clusters` says the plugin is not on PATH** | Install it with `gcloud components install gke-gcloud-auth-plugin`. Without it the generated kubeconfig cannot obtain a token, so the command refuses to write one. |
 | **`add-gke-clusters` registers a cluster but `kubernetes_*` calls fail to authenticate** | The auth plugin is resolving different credentials than OpenSRE. Point `GOOGLE_APPLICATION_CREDENTIALS` at the same service-account key, or run `gcloud auth application-default login`. |
 | **`add-gke-clusters` reports "no endpoint or CA certificate"** | The principal can list clusters but not read their master config. Add `roles/container.clusterViewer`. |
-| **`partial_errors` on a multi-project listing** | One project denied the call while others answered; the results you got are real. The message names the project and the missing permission — usually `roles/container.viewer` or `roles/compute.viewer`. |
+| **A Cloud Run deploy "succeeded" but nothing changed** | The new revision never became ready, so the old one still serves every request. `gcp_list_cloud_run_services` flags this as `rollout_pending`; the reason is in `failing_conditions`. |
+| **A Cloud SQL instance is `RUNNABLE` but refuses writes** | Either it is out of disk — check `disk_pressure` and `out_of_disk_state` — or you are connected to a read replica, in which case `accepts_writes` is `false` and `replica_of` names the primary. |
+| **Every subscription reports `backlog_unknown`** | The principal has `roles/pubsub.viewer` but not `roles/monitoring.viewer`. The backlog metrics live in Cloud Monitoring, not in the Pub/Sub API. |
+| **A Pub/Sub backlog never drains** | Check `dead_letter_topic`. An empty value means a poison message is retried forever. For a `push` subscription, the failing consumer is the endpoint in `push_endpoint`, not a worker you can inspect. |
+| **`gcp_error_reporting_top_errors` returns nothing during a real incident** | Error Reporting only clusters exceptions that reach it. A service logging errors as plain text without a stack trace never appears. Use `gcp_logging_query` with `severity=ERROR`. |
+| **`partial_errors` on a multi-project listing** | One project denied the call while others answered; the results you got are real. The message names the project and the missing permission — usually one of the per-service viewer roles in [Prerequisites](#prerequisites). |
 | **`unreachable_locations` / `unreachable_scopes` in a result** | Google could not reach a zone, so the listing is incomplete. Re-run; if it persists, check the [GCP status dashboard](https://status.cloud.google.com/). |
 
 ## Security best practices
 
-- Grant only the viewer roles you need — `roles/logging.viewer`, `roles/monitoring.viewer`, and optionally `roles/container.viewer`, `roles/container.clusterViewer` and `roles/compute.viewer`. The integration is read-only and never writes to your projects.
+- Grant only the viewer roles you need. `roles/logging.viewer` and `roles/monitoring.viewer` are the baseline; everything else is per-service and listed in [Prerequisites](#prerequisites). The integration is read-only and never writes to your projects.
+- No tool reads your data. Cloud SQL reports the instance, never its rows; Pub/Sub reports queue depth, never message payloads. The one place application content can surface is the representative stack trace in `gcp_error_reporting_top_errors`, which carries whatever your exception messages carry.
 - Kubeconfigs written by `add-gke-clusters` contain no secret — endpoint, public CA certificate, and a delegation to `gke-gcloud-auth-plugin`. Tokens are minted per connection and never stored.
 - Prefer **Workload Identity** or **impersonation** over service-account keys — neither creates a long-lived credential to rotate.
 - If you must use a key, mount it as a file and point `GCP_SERVICE_ACCOUNT_KEY` at the path rather than putting the JSON in an env var.
