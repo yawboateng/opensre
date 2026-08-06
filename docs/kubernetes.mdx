@@ -148,7 +148,8 @@ including which identity the plugin authenticates as, is in
 
 In a container the store is ephemeral, so a cluster registered this way is gone
 at the next restart. Set `GCP_AUTO_REGISTER_GKE=true` and every process registers
-the clusters as it starts instead — see
+the clusters as it starts instead, and again every 30 minutes so a cluster built
+later is picked up too — see
 [Registering at startup](/gcp#registering-at-startup-containers). It is off by
 default, and it stands down entirely when `KUBERNETES_INSTANCES` is set, because
 the store overrides the environment for the whole integration and would

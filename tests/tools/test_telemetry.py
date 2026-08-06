@@ -1123,6 +1123,84 @@ def test_gcp_list_projects_reports_one_event_however_many_credentials_fail(
     assert len(captured_sentry_events) == 1
 
 
+def test_gcp_refresh_discovery_reports_a_failed_relisting_under_its_own_name(
+    captured_sentry_events: list[CapturedSentryEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared scan reports under the tool that called it, not a constant.
+
+    ``gcp_list_projects`` and ``gcp_refresh_discovery`` run the same listing
+    code. If it reported under a fixed name, every discovery failure in the
+    process would be filed against whichever tool that name happened to be.
+    """
+    import integrations.gcp.project_discovery as discovery
+    import integrations.gcp.tools.gcp_refresh_discovery_tool as mod
+    from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
+
+    monkeypatch.delenv(GCP_AUTO_REGISTER_GKE_ENV, raising=False)
+    monkeypatch.setattr(discovery, "build_service", MagicMock(side_effect=RuntimeError("nope")))
+
+    result = mod.gcp_refresh_discovery(
+        default_project="p",
+        available_projects=["p"],
+        project_configs={"p": {"project_id": "p"}},
+    )
+
+    assert result["projects"] == ["p"]
+    assert "discovery_error" in result
+
+    assert len(captured_sentry_events) == 1
+    event = captured_sentry_events[0]
+    assert event.extras["tag.tool_name"] == "gcp_refresh_discovery"
+    assert event.extras["tag.source"] == "gcp"
+
+
+def _raising_register(_logger: Any, _scope: Any) -> None:
+    """Stand in for a registration pass that hits an unreachable control plane."""
+    raise RuntimeError("control plane unreachable")
+
+
+def _empty_rm_service(_config: Any, _api: Any) -> Any:
+    """A Resource Manager client that lists nothing and raises nothing.
+
+    The project half has to *succeed* here, or its own failure would report a
+    second event and the count below would stop meaning what it says.
+    """
+    service = MagicMock()
+    service.projects().list().execute.return_value = {"projects": []}
+    return service
+
+
+def test_gcp_refresh_discovery_reports_a_failed_gke_pass(
+    captured_sentry_events: list[CapturedSentryEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GKE half has its own catch, so it needs its own event.
+
+    It is a separate code path from the project scan — it has to be, because a
+    failure in either half must still let the other half answer — and a catch
+    that returns a message without reporting is exactly the swallow this whole
+    file exists to prevent.
+    """
+    import integrations.gcp.project_discovery as discovery
+    import integrations.gcp.tools.gcp_refresh_discovery_tool as mod
+    from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    monkeypatch.setattr(discovery, "build_service", _empty_rm_service)
+    monkeypatch.setattr(mod, "register_now", _raising_register)
+
+    result = mod.gcp_refresh_discovery(
+        default_project="p",
+        available_projects=["p"],
+        project_configs={"p": {"project_id": "p"}},
+    )
+
+    assert result["gke"]["ran"] is False
+    assert len(captured_sentry_events) == 1
+    assert captured_sentry_events[0].extras["tag.tool_name"] == "gcp_refresh_discovery"
+
+
 def test_eks_client_error_path_uses_warning_severity(
     captured_sentry_events: list[CapturedSentryEvent],
     caplog: pytest.LogCaptureFixture,
@@ -1264,6 +1342,7 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "gcp_list_cloud_sql_instances",
         "gcp_pubsub_backlog",
         "gcp_error_reporting_top_errors",
+        "gcp_refresh_discovery",
         # EKS — enumerated in #1463
         "list_eks_clusters",
         "describe_eks_cluster",
@@ -1638,14 +1717,15 @@ def test_every_migrated_tool_has_a_parameterised_failure_case() -> None:
     and the latter's case already exercises that helper's
     ``report_run_error`` path.
 
-    ``gcp_list_projects`` has its own test below rather than a parameterised
-    case: its failure is partial by design (the live discovery call fails, the
-    configured answer still returns), so it never produces the ``available=
-    False`` / ``error`` shape the shared assertion looks for.
+    ``gcp_list_projects`` and ``gcp_refresh_discovery`` have their own tests
+    below rather than parameterised cases: their failures are partial by design
+    (the live discovery call fails, the configured answer still returns), so
+    neither produces the ``available=False`` / ``error`` shape the shared
+    assertion looks for.
     """
     covered_by_parametrised = {case.expected_tool_name for case in _TOOL_FAILURE_CASES}
     shared_code_path = {"send_openclaw_message"}
-    covered_by_dedicated_test = {"gcp_list_projects"}
+    covered_by_dedicated_test = {"gcp_list_projects", "gcp_refresh_discovery"}
     missing = (
         _MIGRATED_TOOL_NAMES
         - covered_by_parametrised

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
+from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV, GCP_GKE_REFRESH_INTERVAL_ENV
 from config.constants.kubernetes import (
     KUBECONFIG_CONTENT_ENV,
     KUBECONFIG_CONTEXT_ENV,
@@ -22,6 +22,7 @@ from integrations.gcp.gke.registration import (
     RegistrationReport,
 )
 from integrations.gcp.gke.scope import ANY, ClusterScope, parse_scopes
+from integrations.gcp.refresh import NEVER
 
 
 class _Recorder:
@@ -58,6 +59,11 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # The once-per-process guard is module state, so without this the first test
     # to start a thread would silently suppress every later one.
     monkeypatch.setattr(autoregister, "_started_thread", None)
+    # Boot-only by default. Every test below that joins the thread is about the
+    # *first* pass; with the shipped default the thread would then sleep for
+    # half an hour and each of those joins would time out on a live thread.
+    # The refresh loop has its own section, which sets this explicitly.
+    monkeypatch.setenv(GCP_GKE_REFRESH_INTERVAL_ENV, "0")
 
 
 @pytest.fixture
@@ -404,6 +410,76 @@ def test_a_failed_cluster_is_reported_with_its_detail(
 
     assert "private endpoint only" in caplog.text
     assert "registered 1, skipped 0, failed 1" in caplog.text
+
+
+# --- the refresh loop ----------------------------------------------------------
+
+
+class _Passes:
+    """Counts registration passes and ends the loop after ``limit`` of them.
+
+    Substituted for the sleep rather than for the clock: the loop's only exit
+    is what ``_wait_for_next_run`` returns, so driving it here is what makes
+    "it runs more than once" assertable without waiting a real interval.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.waits = 0
+
+    def __call__(self, _interval: float) -> bool:
+        self.waits += 1
+        return self.waits < self.limit
+
+
+def test_registration_repeats_rather_than_running_once(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """A cluster created after boot was invisible until the pod restarted."""
+    monkeypatch.setenv(GCP_GKE_REFRESH_INTERVAL_ENV, "600")
+    monkeypatch.setattr(autoregister, "_wait_for_next_run", _Passes(limit=3))
+
+    autoregister._run(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert len(_ready.calls) == 3
+
+
+def test_a_failed_pass_does_not_end_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure mode the loop introduces, and the reason for the inner guard.
+
+    Without it one transient ``container.googleapis.com`` error would stop every
+    future pass — a permanent loss of refreshing, reported once at warning and
+    never again.
+    """
+    calls: list[int] = []
+
+    def _boom(_logger: logging.Logger, _scope: Any) -> None:
+        calls.append(1)
+        raise RuntimeError("control plane unreachable")
+
+    monkeypatch.setenv(GCP_GKE_REFRESH_INTERVAL_ENV, "600")
+    monkeypatch.setattr(autoregister, "register_now", _boom)
+    monkeypatch.setattr(autoregister, "_wait_for_next_run", _Passes(limit=3))
+
+    autoregister._run(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert len(calls) == 3
+
+
+def test_the_interval_can_be_switched_off(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """``0`` restores the original behaviour: one pass, then the thread ends."""
+    monkeypatch.setenv(GCP_GKE_REFRESH_INTERVAL_ENV, "0")
+
+    autoregister._run(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert len(_ready.calls) == 1
+
+
+def test_switched_off_is_the_only_way_the_loop_ends() -> None:
+    """Pinned directly, because everything above stubs this function out."""
+    assert autoregister._wait_for_next_run(NEVER) is False
 
 
 # --- the background thread -----------------------------------------------------

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from config.constants.gcp import GCP_PROJECT_REFRESH_INTERVAL_ENV
 from integrations.config_models import GCPIntegrationConfig
 from integrations.gcp import project_discovery
 from integrations.gcp.project_discovery import (
@@ -228,6 +229,170 @@ def test_the_cache_key_does_not_hold_the_service_account_key() -> None:
 
     assert "SUPER-SECRET" not in key
     assert len(key) == 64  # sha256 hex
+
+
+# --- the TTL ------------------------------------------------------------------
+
+
+class _Clock:
+    """A monotonic clock the test advances by hand.
+
+    Sleeping for a real TTL is not an option, and shortening the TTL to
+    milliseconds would test a configuration nothing runs: ``refresh_interval``
+    clamps anything under a minute.
+    """
+
+    def __init__(self) -> None:
+        self.seconds = 1000.0
+
+    def __call__(self) -> float:
+        return self.seconds
+
+    def advance(self, seconds: float) -> None:
+        self.seconds += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr(project_discovery, "_now", fake)
+    return fake
+
+
+def test_a_listing_is_not_repeated_before_the_ttl_lapses(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    listing = _Listing(DiscoveryResult(projects=("acme",)))
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "600")
+
+    discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(599)
+    discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert listing.calls == 1
+
+
+def test_a_project_created_after_boot_appears_once_the_ttl_lapses(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """The whole point of the TTL: no restart to see a new project."""
+    listing = _Listing(
+        DiscoveryResult(projects=("acme",)),
+        DiscoveryResult(projects=("acme", "created-just-now")),
+    )
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "600")
+
+    first = discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(601)
+    second = discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert listing.calls == 2
+    assert first.projects == ("acme",)
+    assert second.projects == ("acme", "created-just-now")
+
+
+def test_a_failed_refresh_keeps_the_last_good_listing(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """A refresh may only widen.
+
+    Replacing a good listing with a failure would narrow an allow-list that
+    worked a minute ago — an investigation already querying ``found`` would
+    start getting "unknown GCP project" for it, and the cause would look like
+    the project, not like a blip at Google.
+    """
+    listing = _Listing(
+        DiscoveryResult(projects=("acme", "found")),
+        DiscoveryResult(error="HTTP 503: backend error"),
+    )
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "600")
+
+    discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(601)
+    after_failure = discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert listing.calls == 2
+    assert after_failure.projects == ("acme", "found")
+    assert after_failure.error == ""
+
+
+def test_a_failed_refresh_does_not_retry_until_the_next_expiry(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """Keeping the old listing must not also mean re-listing on every call.
+
+    Extending the expiry is what separates "serve the stale answer" from "treat
+    the entry as permanently expired" — which would put a failing Resource
+    Manager call in front of every GCP tool call for as long as the outage.
+    """
+    listing = _Listing(
+        DiscoveryResult(projects=("acme", "found")),
+        DiscoveryResult(error="HTTP 503: backend error"),
+    )
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "600")
+
+    discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(601)
+    discover(GCPIntegrationConfig(project_id="acme"))
+    for _ in range(5):
+        clock.advance(10)
+        discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert listing.calls == 2
+
+
+def test_a_failure_with_nothing_to_fall_back_on_is_still_cached(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """Boot-time behaviour is unchanged: the first failure is the cached answer."""
+    listing = _Listing(DiscoveryResult(error="HTTP 403: permission denied"))
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "600")
+
+    first = discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(10)
+    second = discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert listing.calls == 1
+    assert first.error == second.error == "HTTP 403: permission denied"
+
+
+def test_a_recovered_credential_widens_the_listing_again(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """A cached failure must expire too, or a fixed IAM grant needs a restart."""
+    listing = _Listing(
+        DiscoveryResult(error="HTTP 403: permission denied"),
+        DiscoveryResult(projects=("acme", "now-visible")),
+    )
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "600")
+
+    discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(601)
+    recovered = discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert recovered.projects == ("acme", "now-visible")
+    assert recovered.error == ""
+
+
+def test_refreshing_can_be_switched_off_entirely(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """``0`` restores the original behaviour: one listing for the process."""
+    listing = _Listing(DiscoveryResult(projects=("acme",)))
+    monkeypatch.setattr(project_discovery, "list_visible_projects", listing)
+    monkeypatch.setenv(GCP_PROJECT_REFRESH_INTERVAL_ENV, "0")
+
+    discover(GCPIntegrationConfig(project_id="acme"))
+    clock.advance(10_000_000)
+    discover(GCPIntegrationConfig(project_id="acme"))
+
+    assert listing.calls == 1
 
 
 # --- request batching ---------------------------------------------------------
