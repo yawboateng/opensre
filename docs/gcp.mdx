@@ -314,11 +314,11 @@ GCP_AUTO_REGISTER_GKE=prod-a/checkout,prod-b    # mix the two freely
 GCP_AUTO_REGISTER_GKE='*/checkout'              # that cluster, whichever project holds it
 ```
 
-Reach for `project/cluster` when a project holds one cluster worth investigating and others that are not the agent's business — registering a cluster is what makes it reachable by tools that restart deployments and delete pods, and project granularity is all-or-nothing. Cluster names are matched exactly and are qualified by project on purpose: two clusters called `prod` in different projects is ordinary, so an unqualified name would quietly register both. Say `*/prod` when you mean that.
+Reach for `project/cluster` when a project holds one cluster worth investigating and others that are not the agent's business — registering a cluster is what lets the agent read from it, and project granularity is all-or-nothing. Cluster names are matched exactly and are qualified by project on purpose: two clusters called `prod` in different projects is ordinary, so an unqualified name would quietly register both. Say `*/prod` when you mean that.
 
 Clusters that were found and then filtered out are listed in the startup log, so a mistyped name shows up as a name you can compare against rather than as nothing happening.
 
-It is off unless you set it, on purpose: registering a cluster is what makes it reachable by tools that can restart deployments and delete pods, so widening that reach should be a decision you made rather than something a boot sequence did for you. `true` still only covers projects you configured in `GCP_PROJECT_ID` / `GCP_ADDITIONAL_PROJECTS` / `GCP_INSTANCES` — it never enumerates your whole organisation.
+It is off unless you set it, on purpose. The `kubernetes_*` tools are read-only — none of them can restart a deployment or delete a pod, and Secrets cannot be fetched — but read-only is not the same as harmless: `kubernetes_get_pod_logs` and `kubernetes_list_configmaps` routinely surface credentials and personal data, and whatever they return ends up in LLM context and in investigation reports. Widening that should be a decision you made rather than something a boot sequence did for you. `true` still only covers projects you configured in `GCP_PROJECT_ID` / `GCP_ADDITIONAL_PROJECTS` / `GCP_INSTANCES` — it never enumerates your whole organisation.
 
 Registration runs in the background, so a slow GKE control plane cannot hold up startup or fail a readiness probe. For a few seconds after boot the clusters are not registered yet; a request arriving in that window sees the `kubernetes_*` tools as unavailable.
 

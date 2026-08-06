@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from integrations.kubernetes.client import _RESOURCE_DISPATCH
 from integrations.kubernetes.tools import (
     KubernetesDescribePodTool,
     KubernetesGetEventsTool,
@@ -1065,3 +1066,32 @@ def test_list_clusters_run_single_default() -> None:
     assert result["total"] == 1
     assert result["clusters"][0]["name"] == "default"
     assert result["clusters"][0]["is_default"] is True
+
+
+# --- read-only surface -------------------------------------------------------
+
+
+def test_every_fetchable_resource_is_read_only() -> None:
+    """The kubernetes integration reads; it never writes.
+
+    Documented as the reason auto-registering a GKE cluster is an exposure
+    decision rather than a destructive one (``docs/gcp.mdx``), and prose is not
+    enforceable. If someone adds a ``patch_``/``delete_``/``create_`` entry here,
+    that argument stops being true and this fails rather than the docs quietly
+    going stale.
+    """
+    verbs = {method for _api, method, _cluster_scoped in _RESOURCE_DISPATCH.values()}
+
+    assert verbs, "dispatch table is empty; this test would pass vacuously"
+    assert all(verb.startswith("read_") for verb in verbs), sorted(
+        verb for verb in verbs if not verb.startswith("read_")
+    )
+
+
+def test_secrets_are_not_fetchable() -> None:
+    """``kubernetes_get_resource`` takes an enum, and Secret is deliberately absent.
+
+    Pod logs and configmaps already leak credentials by accident; reading Secrets
+    would do it by design.
+    """
+    assert not [key for key in _RESOURCE_DISPATCH if "secret" in key.lower()]

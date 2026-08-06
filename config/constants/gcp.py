@@ -39,9 +39,10 @@ GCP_MAX_RESULTS_ENV: Final[str] = "GCP_MAX_RESULTS"
 GCP_INSTANCES_ENV: Final[str] = "GCP_INSTANCES"
 
 #: Opt-in: register discovered GKE clusters as Kubernetes instances at process
-#: start. Off unless set, because it widens what the agent can reach — every
+#: start. Off unless set, because it widens what the agent can read — every
 #: cluster the credential can enumerate in the configured projects becomes a
-#: target for the ``kubernetes_*`` tools, some of which act rather than read.
+#: source for the ``kubernetes_*`` tools, and pod logs and configmaps routinely
+#: carry credentials and personal data.
 #: Accepts ``true`` for every configured project, the same comma-separated
 #: project grammar the GCP tools take, or ``project/cluster`` entries to narrow
 #: it to named clusters — the granularity that matters when a project holds one

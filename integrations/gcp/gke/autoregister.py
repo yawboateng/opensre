@@ -8,11 +8,15 @@ to ``kubectl exec`` into each pod after each rollout, and nothing surfaces the
 omission until an investigation reaches for a ``kubernetes_*`` tool and finds
 none.
 
-**Opt-in, deliberately.** Registering a cluster widens what the agent can reach,
-and some ``kubernetes_*`` tools act rather than read. "Every cluster my
-credential can enumerate is now a target" is a policy decision an operator
-should make explicitly, not a side effect of a boot sequence — so nothing
-happens unless :data:`GCP_AUTO_REGISTER_GKE_ENV` says so. Scope is bounded three
+**Opt-in, deliberately.** Registering a cluster widens what the agent can read.
+Every ``kubernetes_*`` tool is read-only today — the client's resource dispatch
+holds ``read_*`` calls and nothing else, and Secrets are not fetchable — but
+read-only is not harmless: ``kubernetes_get_pod_logs`` and
+``kubernetes_list_configmaps`` routinely surface credentials and personal data,
+and whatever they return lands in LLM context and in investigation reports.
+"Every cluster my credential can enumerate is now a source" is a policy decision
+an operator should make explicitly, not a side effect of a boot sequence — so
+nothing happens unless :data:`GCP_AUTO_REGISTER_GKE_ENV` says so. Scope is bounded three
 times over: to the projects that variable names, to the projects the GCP
 integration is already configured for (``resolve_projects`` rejects anything
 else) so even ``true`` cannot reach an estate nobody configured, and — when an
