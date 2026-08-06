@@ -34,6 +34,25 @@ helm install opensre deploy/helm/opensre \
 Both can run together (default). The gateway is pinned to one replica because
 Slack Socket Mode is single-consumer.
 
+### Slack requires an organization
+
+Beyond the Slack tokens in the Secret, the gateway refuses every Slack turn
+until it knows who owns the data that turn produces:
+
+```yaml
+config:
+  extraEnv:
+    ORGANIZATION_ID: my-org           # required; fails closed when missing
+    OPENSRE_SILO_TEAM_IDS: T0123456   # recommended; allowlist of Slack teams
+```
+
+Without `ORGANIZATION_ID` the pod starts, connects to Socket Mode, and then
+fails each message with `no organization is configured for this deployment` —
+so the symptom appears only once someone types. Without
+`OPENSRE_SILO_TEAM_IDS` any workspace that installs the app is served from this
+organization's identity and inherits its credentials; set it to fail closed.
+Details in [docs/principal-scoped-storage.mdx](../../../docs/principal-scoped-storage.mdx).
+
 ## Secrets
 
 `secret.create=true` (default) renders a Secret from `secret.data`. **Do not
@@ -50,6 +69,32 @@ The pod `ServiceAccount` supports cloud IAM annotations (GKE Workload Identity,
 AWS IRSA) for cloud integrations. OpenSRE's Kubernetes tools authenticate with a
 kubeconfig supplied via the Secret (`KUBECONFIG_CONTENT`), not the in-cluster
 token — register additional clusters with `opensre integrations add-cluster`.
+
+### Keyless LLM auth (Vertex AI / Bedrock)
+
+`vertex-ai` and `bedrock` use ambient cloud credentials, so **no LLM key goes in
+the Secret at all** — annotate the ServiceAccount instead:
+
+```yaml
+config:
+  llmProvider: vertex-ai
+  extraEnv:
+    VERTEX_AI_PROJECT: my-gcp-project
+    VERTEX_AI_LOCATION: global
+    VERTEX_AI_REASONING_MODEL: claude-opus-5   # Claude served through Vertex
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: opensre@my-gcp-project.iam.gserviceaccount.com
+```
+
+The Google service account needs `roles/aiplatform.user` in the Vertex project,
+and a `roles/iam.workloadIdentityUser` binding for
+`<cluster-project>.svc.id.goog[<namespace>/<serviceaccount>]`. Those two project
+names differ when the cluster and the Vertex entitlement live in separate
+projects; cross-project Workload Identity works, but the binding is easy to miss
+and the pod fails only on the first LLM call.
+See [docs/llm-providers.mdx](../../../docs/llm-providers.mdx) for model IDs.
 
 ## Persistence
 
@@ -91,7 +136,7 @@ Keep credentials out of `values-prod.yaml`; supply them through the
 | Key | Default | Description |
 | --- | --- | --- |
 | `image.repository` / `image.tag` | `opensre` / appVersion | image |
-| `config.llmProvider` | `anthropic` | LLM provider (key goes in the Secret) |
+| `config.llmProvider` | `anthropic` | LLM provider (key goes in the Secret; `vertex-ai`/`bedrock` need none) |
 | `web.enabled` / `gateway.enabled` | `true` / `true` | which workloads to run |
 | `web.autoscaling.enabled` | `false` | HPA for the web Deployment |
 | `secret.create` / `secret.existingSecret` | `true` / `""` | render Secret vs reference one |
