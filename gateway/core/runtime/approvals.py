@@ -21,7 +21,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from core.execution import BeforeToolCallResult, ToolExecutionHooks, ToolExecutionRequest
+from core.execution import (
+    BeforeToolCallResult,
+    ToolExecutionHooks,
+    ToolExecutionPatch,
+    ToolExecutionRequest,
+    ToolExecutionResult,
+)
 from gateway.core.runtime.security_audit import audit_security_action
 
 logger = logging.getLogger("gateway")
@@ -143,18 +149,78 @@ class ApprovalBroker:
         return (pending.approved, pending.decided_by)
 
 
+@dataclass(frozen=True)
+class DecidedPrompt:
+    """Where an approved prompt was posted, so its outcome can be rewritten."""
+
+    message_id: str
+    decided_by: str
+
+
+class DecidedPrompts:
+    """Approved prompts still waiting on their tool result, keyed by call id.
+
+    The identifiers worth reporting — a pull request number, a URL — only exist
+    once the tool has run, which is after the prompt has already been answered
+    and rewritten. One turn can approve several calls, and a parallel batch can
+    have two in flight at once, so the receipt is matched by tool-call id rather
+    than by "the most recent one".
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, DecidedPrompt] = {}
+        self._lock = threading.Lock()
+
+    def remember(self, call_id: str, *, message_id: str, decided_by: str) -> None:
+        with self._lock:
+            self._entries[call_id] = DecidedPrompt(message_id=message_id, decided_by=decided_by)
+
+    def take(self, call_id: str) -> DecidedPrompt | None:
+        """Pop the prompt for *call_id*; None when it was denied or already used."""
+        with self._lock:
+            return self._entries.pop(call_id, None)
+
+
 class ApprovalPrompter(Protocol):
     """Asks one conversation for approval and reports the decision."""
 
     def request(
         self,
         *,
-        tool_name: str,
+        call_id: str,
+        headline: str,
         reason: str,
-        arguments: Mapping[str, Any],
+        details: str,
         expiry_seconds: float,
     ) -> tuple[bool, str]:
         """Return (approved, id of the member who decided; empty when expired)."""
+
+    def attach_receipt(self, *, call_id: str, receipt: str) -> None:
+        """Rewrite the decided prompt for *call_id* now the call has produced ids."""
+
+
+def tool_headline(tool: Any, tool_name: str, arguments: Mapping[str, Any]) -> str:
+    """The action named in the reviewer's terms, or the bare tool name."""
+    display = getattr(tool, "approval_display", None)
+    if display is None:
+        return tool_name
+    try:
+        return _one_line(display.headline(arguments)) or tool_name
+    except Exception:  # pragma: no cover - defensive: never block a write on rendering
+        logger.warning("approval headline rendering failed tool=%s", tool_name, exc_info=True)
+        return tool_name
+
+
+def tool_details(tool: Any, tool_name: str, arguments: Mapping[str, Any]) -> str:
+    """The tool's own description of the change, or the generic argument summary."""
+    display = getattr(tool, "approval_display", None)
+    if display is None:
+        return arguments_preview(arguments)
+    try:
+        return _clamp(display.details(arguments))
+    except Exception:  # pragma: no cover - defensive: never block a write on rendering
+        logger.warning("approval preview rendering failed tool=%s", tool_name, exc_info=True)
+        return arguments_preview(arguments)
 
 
 def approval_tool_hooks(prompter: ApprovalPrompter) -> ToolExecutionHooks:
@@ -164,10 +230,12 @@ def approval_tool_hooks(prompter: ApprovalPrompter) -> ToolExecutionHooks:
         tool = request.tool
         if not bool(getattr(tool, "requires_approval", False)):
             return None
+        tool_name = request.tool_call.name
         approved, decided_by = prompter.request(
-            tool_name=request.tool_call.name,
+            call_id=request.tool_call.id,
+            headline=tool_headline(tool, tool_name, request.arguments),
             reason=str(getattr(tool, "approval_reason", "") or ""),
-            arguments=request.arguments,
+            details=tool_details(tool, tool_name, request.arguments),
             expiry_seconds=float(getattr(tool, "approval_expiry_seconds", 300)),
         )
         if approved:
@@ -182,7 +250,39 @@ def approval_tool_hooks(prompter: ApprovalPrompter) -> ToolExecutionHooks:
             ),
         )
 
-    return ToolExecutionHooks(before_tool_call=before_tool_call)
+    def after_tool_call(
+        request: ToolExecutionRequest,
+        result: ToolExecutionResult,
+    ) -> ToolExecutionPatch | None:
+        """Rewrite the approval message with what the approved call produced.
+
+        Returns no patch: this only edits the chat message a human is reading.
+        The transcript the model sees is untouched.
+        """
+        tool = request.tool
+        display = getattr(tool, "approval_display", None)
+        if display is None or result.is_error:
+            return None
+        if not bool(getattr(tool, "requires_approval", False)):
+            return None
+        payload = result.details if isinstance(result.details, Mapping) else {}
+        try:
+            receipt = _one_line(display.receipt(request.arguments, payload))
+        except Exception:  # pragma: no cover - defensive: the write already succeeded
+            logger.warning(
+                "approval receipt rendering failed tool=%s",
+                request.tool_call.name,
+                exc_info=True,
+            )
+            return None
+        if receipt:
+            prompter.attach_receipt(call_id=request.tool_call.id, receipt=receipt)
+        return None
+
+    return ToolExecutionHooks(
+        before_tool_call=before_tool_call,
+        after_tool_call=after_tool_call,
+    )
 
 
 def _is_secret_key(key: str) -> bool:
@@ -289,6 +389,19 @@ def arguments_preview(arguments: Mapping[str, Any]) -> str:
     return "\n".join(kept)
 
 
+def _clamp(text: str) -> str:
+    """Hold any preview inside the transport budget, on a line boundary.
+
+    A tool renders its own prompt, so the length guarantee has to be enforced
+    here — a verbose renderer must not be able to overflow a Slack section or
+    have Discord silently drop the buttons off the end of the message.
+    """
+    if len(text) <= ARGS_PREVIEW_LIMIT:
+        return text
+    kept = text[:ARGS_PREVIEW_LIMIT].rsplit("\n", 1)[0]
+    return f"{kept}\n… {len(text) - len(kept)} more character(s) not shown"
+
+
 __all__ = [
     "APPROVE_ACTION_ID",
     "ARGS_PREVIEW_LIMIT",
@@ -296,6 +409,10 @@ __all__ = [
     "MAX_APPROVAL_WAIT_SECONDS",
     "ApprovalBroker",
     "ApprovalPrompter",
+    "DecidedPrompt",
+    "DecidedPrompts",
     "approval_tool_hooks",
     "arguments_preview",
+    "tool_details",
+    "tool_headline",
 ]

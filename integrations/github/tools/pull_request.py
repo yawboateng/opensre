@@ -26,6 +26,7 @@ from integrations.github.tools.github_cli.credentials import (
     github_source_available,
     resolve_github_token,
 )
+from integrations.github.tools.pull_request_approval import PULL_REQUEST_APPROVAL_DISPLAY
 from integrations.github.write_errors import GitHubWriteError
 
 ERR_TOKEN = "github_token_missing"
@@ -49,6 +50,10 @@ _DIFF_ANTI_EXAMPLE = (
 )
 _MERGE_ANTI_EXAMPLE = "Merging, approving, or closing a pull request (this tool only opens one)"
 _BINARY_ANTI_EXAMPLE = "Committing binary files such as images or archives (UTF-8 text only)"
+_DRAFT_ANTI_EXAMPLE = (
+    "Opening the pull request as a draft when nobody asked for one (required "
+    "status checks do not run on drafts, so the PR looks unverified)"
+)
 
 
 def _pull_request_available(sources: dict[str, dict]) -> bool:
@@ -127,6 +132,7 @@ def _failure(kind: str, message: str, *, branch: str = "", branch_created: bool 
         _DIFF_ANTI_EXAMPLE,
         _MERGE_ANTI_EXAMPLE,
         _BINARY_ANTI_EXAMPLE,
+        _DRAFT_ANTI_EXAMPLE,
         "Pushing straight to main or any protected branch",
     ],
     requires=["owner", "repo"],
@@ -134,9 +140,9 @@ def _failure(kind: str, message: str, *, branch: str = "", branch_created: bool 
     side_effect_level="mutating",
     requires_approval=True,
     approval_reason="Creates a branch, commits file changes, and opens a pull request on GitHub.",
-    # Identity first, payload last: the approval prompt truncates the rendered
-    # arguments at 400 characters, and the reviewer needs repo/branch/title far
-    # more than the first few lines of a file.
+    # Renders the approval prompt as a pull request rather than a field dump;
+    # see integrations/github/tools/pull_request_approval.py.
+    approval_display=PULL_REQUEST_APPROVAL_DISPLAY,
     input_schema={
         "type": "object",
         "properties": {
@@ -166,7 +172,13 @@ def _failure(kind: str, message: str, *, branch: str = "", branch_created: bool 
             },
             "draft": {
                 "type": "boolean",
-                "description": "Open the pull request as a draft. Defaults to false.",
+                "description": (
+                    "Open the pull request as a draft. Defaults to false, and should stay "
+                    "false unless the user explicitly asked for a draft: required status "
+                    "checks and CI gates do not run on draft pull requests, so the change "
+                    "arrives looking unverified and cannot be merged until someone marks "
+                    "it ready."
+                ),
             },
             "changes": {
                 "type": "array",

@@ -44,10 +44,36 @@ contents.
 **Every call asks a human first.** The interactive shell prompts
 `Proceed? [Y/n]`; Slack and Discord post **Approve** / **Deny** buttons and the
 call blocks until someone clicks or the request expires (3 minutes). Nothing is
-written to GitHub before that. The prompt lists the repository, both branches,
-the title, and every file the commit touches, so you can see the blast radius
-without leaving the thread — file contents are reported by size rather than
-pasted, and anything under a token- or password-shaped key is redacted.
+written to GitHub before that.
+
+The prompt reads like the pull request it is about to open — repository, base
+branch, new branch, the description, and every file the commit touches — so you
+can judge the blast radius without leaving the thread:
+
+```
+🔒 Approval needed — Create PR — fix(pubsub): drop the orphaned subscription
+Creates a branch, commits file changes, and opens a pull request on GitHub.
+
+acme/platform
+main  ←  fix/drop-orphan-subscription
+
+**What:** remove the placeholder.
+
+2 files changed
+  · terraform/modules/functions/notifications.tf — 2,445 chars written
+  · terraform/modules/functions/legacy.tf — deleted
+```
+
+File contents are reported by size rather than pasted, a draft PR says so
+(required checks do not run on drafts), and a change set longer than twelve
+files reports the remainder.
+
+Once you approve, that same message becomes the record of what happened —
+rewritten with the pull request number and link as soon as the call returns:
+
+```
+✅ Create PR #2604 — fix(pubsub): drop the orphan  https://github.com/acme/platform/pull/2604 — approved by @you
+```
 
 What it will and will not do:
 
