@@ -8,7 +8,13 @@ from typing import Any
 import pytest
 
 from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
-from config.constants.kubernetes import KUBERNETES_INSTANCES_ENV
+from config.constants.kubernetes import (
+    KUBECONFIG_CONTENT_ENV,
+    KUBECONFIG_CONTEXT_ENV,
+    KUBECONFIG_NAMESPACE_ENV,
+    KUBECONFIG_PATH_ENV,
+    KUBERNETES_INSTANCES_ENV,
+)
 from integrations.gcp.gke import autoregister
 from integrations.gcp.gke.registration import (
     ClusterRegistration,
@@ -36,7 +42,18 @@ def _resolved() -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(GCP_AUTO_REGISTER_GKE_ENV, raising=False)
-    monkeypatch.delenv(KUBERNETES_INSTANCES_ENV, raising=False)
+    # Every variable that makes the environment declare a kubernetes integration,
+    # not just the instances one. KUBECONFIG especially: it is set on virtually
+    # every developer machine, and the guard reads it, so leaving it in place
+    # would make these tests pass or fail depending on whose laptop ran them.
+    for name in (
+        KUBERNETES_INSTANCES_ENV,
+        KUBECONFIG_PATH_ENV,
+        KUBECONFIG_CONTENT_ENV,
+        KUBECONFIG_CONTEXT_ENV,
+        KUBECONFIG_NAMESPACE_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
     # The once-per-process guard is module state, so without this the first test
     # to start a thread would silently suppress every later one.
     monkeypatch.setattr(autoregister, "_started_thread", None)
@@ -126,6 +143,47 @@ def test_an_empty_kubernetes_instances_env_does_not_block(
     autoregister.register_now(logging.getLogger(__name__), "*")
 
     assert len(_ready.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["prod-cluster-a", "gke-prod,gke-dev", "[]", "{}", "not json at all"],
+)
+def test_an_unparseable_instances_env_declares_nothing_so_we_still_register(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder, value: str
+) -> None:
+    """Set-but-meaningless must not stand us down.
+
+    ``KUBERNETES_INSTANCES`` is a JSON array of instance objects. Anything else —
+    a bare cluster name is the obvious typo — fails to parse, and the loader
+    falls through to the legacy vars, so the variable contributes **zero**
+    clusters. Standing down for it would leave the operator with neither: no
+    env-declared clusters and no auto-registered ones, from an env var that looks
+    set. Deferring only to config that actually exists is what keeps the guard
+    from being a footgun of its own.
+    """
+    monkeypatch.setenv(KUBERNETES_INSTANCES_ENV, value)
+
+    autoregister.register_now(logging.getLogger(__name__), "*")
+
+    assert len(_ready.calls) == 1, _ready.calls
+
+
+def test_a_single_cluster_declared_via_kubeconfig_also_stands_us_down(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """The hazard is the whole-record override, not one variable's name.
+
+    ``KUBECONFIG_CONTENT`` declares a default cluster without
+    ``KUBERNETES_INSTANCES`` being involved, and the store shadows that record
+    exactly as completely. A guard that read one variable name would sail past
+    this and silently disconnect the operator's only cluster.
+    """
+    monkeypatch.setenv(KUBECONFIG_CONTENT_ENV, "apiVersion: v1\nkind: Config\n")
+
+    autoregister.register_now(logging.getLogger(__name__), "*")
+
+    assert _ready.calls == []
 
 
 # --- refusing to register instances that cannot work ---------------------------

@@ -34,8 +34,8 @@ import os
 import threading
 
 from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
-from config.constants.kubernetes import KUBERNETES_INSTANCES_ENV
-from integrations.catalog import resolve_local_classified_integrations
+from config.constants.kubernetes import KUBECONFIG_CONTENT_ENV, KUBERNETES_INSTANCES_ENV
+from integrations.catalog import load_env_integrations, resolve_local_classified_integrations
 from integrations.gcp.gke.kubeconfig import AUTH_PLUGIN, plugin_installed
 from integrations.gcp.gke.registration import Outcome, register_gke_clusters
 
@@ -123,16 +123,38 @@ def _run(logger: logging.Logger, selector: str) -> None:
         logger.warning("GKE auto-registration failed (%s)", type(exc).__name__)
 
 
+def env_declares_kubernetes() -> bool:
+    """Whether the environment contributes a kubernetes record to the merge.
+
+    Asks the loader whose output is actually merged rather than re-reading the
+    variables, so the two can never disagree. That matters in both directions:
+
+    * ``KUBERNETES_INSTANCES`` that is set but not parseable — a bare cluster
+      name instead of a JSON array, say — contributes **nothing**. Treating the
+      variable's mere presence as authoritative would stand us down in favour of
+      an environment that declares no clusters at all, leaving the operator with
+      neither: no env-declared clusters, no auto-registered ones, and a
+      ``kubernetes`` integration that simply is not there.
+    * ``KUBECONFIG_CONTENT`` / ``KUBECONFIG_PATH`` declare a default cluster
+      without ``KUBERNETES_INSTANCES`` being involved at all, and the store
+      shadows that record exactly as thoroughly. Reading one variable name would
+      miss it.
+    """
+    return any(record.get("service") == "kubernetes" for record in load_env_integrations())
+
+
 def register_now(logger: logging.Logger, selector: str) -> None:
     """Discover and register, logging the outcome. Synchronous; may raise."""
-    if os.getenv(KUBERNETES_INSTANCES_ENV, "").strip():
+    if env_declares_kubernetes():
         # The store overrides the environment for a whole service, not per
         # instance, so writing even one discovered cluster here would drop every
-        # cluster the operator declared in the env var. Their list is explicit
+        # cluster the operator declared in the environment. Theirs is explicit
         # and ours is inferred; theirs wins, and we do nothing at all.
         logger.info(
-            "GKE auto-registration skipped: %s is set and is authoritative.",
+            "GKE auto-registration skipped: the environment already declares the kubernetes "
+            "integration (%s or %s), and the local store would shadow it wholesale.",
             KUBERNETES_INSTANCES_ENV,
+            KUBECONFIG_CONTENT_ENV,
         )
         return
 
@@ -178,4 +200,9 @@ def register_now(logger: logging.Logger, selector: str) -> None:
     )
 
 
-__all__ = ["register_now", "requested_projects", "start_gke_autoregistration"]
+__all__ = [
+    "env_declares_kubernetes",
+    "register_now",
+    "requested_projects",
+    "start_gke_autoregistration",
+]

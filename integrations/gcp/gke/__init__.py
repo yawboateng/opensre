@@ -8,6 +8,7 @@ reports as ``unregistered_clusters``.
 from __future__ import annotations
 
 from integrations.gcp.gke.autoregister import (
+    env_declares_kubernetes,
     register_now,
     requested_projects,
     start_gke_autoregistration,
@@ -29,6 +30,7 @@ __all__ = [
     "RegistrationReport",
     "build_kubeconfig",
     "discover_clusters",
+    "env_declares_kubernetes",
     "plugin_installed",
     "register_gke_clusters",
     "register_now",
