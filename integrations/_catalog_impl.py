@@ -2008,6 +2008,35 @@ def _slack_effective_config(
     return config
 
 
+def resolve_local_classified_integrations(
+    *,
+    store_integrations: list[dict[str, Any]] | None = None,
+    env_integrations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Classify the local integrations from ``~/.opensre`` and the environment.
+
+    Returns the :func:`classify_integrations` shape — ``resolved[service]`` is
+    the default instance's **flat config**, with ``_all_{service}_instances``
+    alongside it. That is what every runtime consumer expects:
+    ``availability_view`` and the ``extract_params`` of every tool read it, as
+    do the ``integrations/selectors.py`` helpers.
+
+    :func:`resolve_effective_integrations` returns a different, wrapper shape
+    (``{service: {"source": ..., "config": {...}}}``) built for display. Passing
+    that to a runtime consumer is silently wrong rather than an error: the
+    per-service sanitizers drop the unrecognised ``source``/``config`` keys and
+    hand back an empty config, so the caller reports the integration as
+    unconfigured while the environment is set correctly.
+    """
+    store_records = (
+        list(store_integrations) if store_integrations is not None else load_integrations()
+    )
+    env_records = (
+        list(env_integrations) if env_integrations is not None else load_env_integrations()
+    )
+    return classify_integrations(merge_local_integrations(store_records, env_records))
+
+
 def resolve_effective_integrations(
     *,
     store_integrations: list[dict[str, Any]] | None = None,

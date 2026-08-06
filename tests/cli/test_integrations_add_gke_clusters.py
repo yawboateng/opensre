@@ -46,7 +46,7 @@ def _no_store(monkeypatch: pytest.MonkeyPatch) -> None:
     def _resolved() -> dict[str, Any]:
         return {"gcp": {"project_id": "acme"}}
 
-    monkeypatch.setattr("integrations.catalog.resolve_effective_integrations", _resolved)
+    monkeypatch.setattr("integrations.catalog.resolve_local_classified_integrations", _resolved)
 
 
 def _set_plugin(monkeypatch: pytest.MonkeyPatch, installed: bool) -> None:
@@ -181,3 +181,30 @@ def test_a_malformed_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == ERROR
     assert "expected KEY=VALUE" in result.output
     assert recorder.calls == []
+
+
+def test_the_resolver_the_command_uses_yields_projects_registration_can_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command's resolver must produce the shape ``gcp_tool_params`` reads.
+
+    Every other test here stubs ``register_gke_clusters``, and the registration
+    tests build their own classified dict, so nothing exercised the seam between
+    them. It was broken: the command passed ``resolve_effective_integrations``,
+    whose ``{service: {"source": ..., "config": {...}}}`` wrapper the GCP
+    sanitizer discards wholesale. The command then reported "no GCP projects are
+    configured" on a deployment with ``GCP_PROJECT_ID`` set, and no test noticed.
+
+    Asserting on the shape rather than mocking it is the point — a mock would
+    have agreed with the broken code, which is exactly what ``_no_store`` did.
+    """
+    from integrations.catalog import resolve_local_classified_integrations
+    from integrations.gcp.tool_params import gcp_tool_params
+
+    monkeypatch.setenv("GCP_PROJECT_ID", "acme")
+    monkeypatch.setenv("GCP_ADDITIONAL_PROJECTS", "acme-staging")
+
+    scope = gcp_tool_params(resolve_local_classified_integrations(store_integrations=[]))
+
+    assert scope["default_project"] == "acme"
+    assert scope["available_projects"] == ["acme", "acme-staging"]
