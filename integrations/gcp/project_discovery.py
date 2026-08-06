@@ -15,17 +15,29 @@ operator who writes ``GCP_ADDITIONAL_PROJECTS="*"`` expecting discovery gets a
 project whose id is literally ``*``, which passes every local check and then
 fails inside Google. ``discover`` cannot be mistaken for a project id.
 
-**Cached for the life of the process, failures included.** The list feeds an
-allow-list consulted on every GCP tool call, so re-listing per call would put a
-network round trip in front of each one. Caching only successes would be worse
-than useless for the failure that actually happens: a service account without
-``resourcemanager.projects.list`` would retry, and pay, forever. One attempt per
-credential per process; a restart re-attempts, which is the right cadence for a
-list that changes when someone creates a project.
+**Cached with a TTL, failures included.** The list feeds an allow-list consulted
+on every GCP tool call, so re-listing per call would put a network round trip in
+front of each one. Failures are cached too: the failure that actually happens is
+a service account without ``resourcemanager.projects.list``, and caching only
+successes would retry — and pay — on every single call.
 
-**Never widens on failure.** A failed discovery yields the configured projects
-alone. The alternative — falling back to something broader — would mean a
-transient Google error quietly changed what the agent is allowed to read.
+The TTL is what makes a project created after boot reachable without a restart.
+It is a *ceiling on staleness*, not a promise of freshness: nothing runs on a
+timer here, so the re-list happens on the first tool call after expiry. An
+operator who needs the estate re-read *now* has ``gcp_refresh_discovery``.
+
+**A refresh may only widen.** Two rules, and the second is the one that is easy
+to get wrong:
+
+1. A failed discovery yields the configured projects alone. Falling back to
+   something broader would let a transient Google error quietly grant read
+   access nobody granted.
+2. A failed *re*-discovery keeps the previous successful listing. This is the
+   opposite of rule 1 and deliberately so: at boot there is nothing better to
+   fall back to, but once a good listing exists, replacing it with a failure
+   would shrink an allow-list that worked a minute ago — an investigation
+   mid-flight would start getting "unknown GCP project" for a project it had
+   already queried. Stale-but-working beats correct-and-broken.
 """
 
 from __future__ import annotations
@@ -33,9 +45,14 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 
-from config.constants.gcp import GCP_DISCOVER_PROJECTS_TOKEN
+from config.constants.gcp import (
+    GCP_ADDITIONAL_PROJECTS_ENV,
+    GCP_DISCOVER_PROJECTS_TOKEN,
+    GCP_PROJECT_REFRESH_INTERVAL_ENV,
+)
 from integrations.config_models import GCPIntegrationConfig
 from integrations.gcp.client import (
     RESOURCE_MANAGER_API,
@@ -43,6 +60,7 @@ from integrations.gcp.client import (
     build_service,
     describe_api_error,
 )
+from integrations.gcp.refresh import refresh_interval
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +73,15 @@ MAX_DISCOVERED = 200
 
 #: Only ``ACTIVE`` projects are usable; ``DELETE_REQUESTED`` ones still list.
 _ACTIVE = "ACTIVE"
+
+
+def _now() -> float:
+    """Monotonic seconds. A function so tests can drive expiry without sleeping.
+
+    Monotonic rather than wall clock: an NTP step backwards would otherwise
+    pin a cached listing until the clock caught up.
+    """
+    return time.monotonic()
 
 
 @dataclass(frozen=True)
@@ -83,27 +110,43 @@ class DiscoveryResult:
         return bool(self.projects or self.error)
 
 
+@dataclass(frozen=True)
+class _Entry:
+    """One cached listing and the moment it stops being served.
+
+    ``expires_at`` is on the entry rather than derived from a stored timestamp
+    plus the current interval, so an interval change cannot retroactively expire
+    — or un-expire — a listing that is already in hand.
+    """
+
+    result: DiscoveryResult
+    expires_at: float
+
+    def fresh_at(self, now: float) -> bool:
+        return now < self.expires_at
+
+
 @dataclass
 class _Cache:
     """Process-wide memo of discovery per credential.
 
     The lock guards the dict, deliberately *not* the network call: holding it
     across ``projects.list`` would serialize every GCP tool call in the process
-    behind one request, over an httplib2 transport with no per-request timeout.
-    A concurrent first call therefore duplicates the listing once and then
-    converges — cheap, versus a hung call blocking the whole process.
+    behind one request. A concurrent expiry therefore duplicates the listing
+    once and then converges — cheap, and the alternative is every tool call in
+    the process queueing behind one Google request.
     """
 
-    entries: dict[str, DiscoveryResult] = field(default_factory=dict)
+    entries: dict[str, _Entry] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def get(self, key: str) -> DiscoveryResult | None:
+    def get(self, key: str) -> _Entry | None:
         with self.lock:
             return self.entries.get(key)
 
-    def put(self, key: str, result: DiscoveryResult) -> None:
+    def put(self, key: str, entry: _Entry) -> None:
         with self.lock:
-            self.entries[key] = result
+            self.entries[key] = entry
 
     def clear(self) -> None:
         with self.lock:
@@ -178,43 +221,88 @@ def list_visible_projects(config: GCPIntegrationConfig) -> DiscoveryResult:
 
 
 def discover(config: GCPIntegrationConfig) -> DiscoveryResult:
-    """Cached :func:`list_visible_projects`. One attempt per credential per process."""
+    """Cached :func:`list_visible_projects`, re-listed once the TTL lapses."""
     key = _cache_key(config)
+    now = _now()
     cached = _cache.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and cached.fresh_at(now):
+        return cached.result
 
     result = list_visible_projects(config)
-    fallback_project = config.project_id
+    previous = cached.result if cached is not None else None
+    if result.error and previous is not None and previous.projects:
+        # Rule 2 in the module docstring: a refresh may only widen. Keep the
+        # listing that worked and try again next expiry, rather than narrowing
+        # the allow-list under an investigation that is already running.
+        logger.warning(
+            "GCP project re-discovery failed for the credential covering %s; "
+            "keeping the %d project(s) found previously (%s)",
+            config.project_id or "the default project",
+            len(previous.projects),
+            result.error,
+        )
+        _cache.put(key, _Entry(previous, now + refresh_interval(GCP_PROJECT_REFRESH_INTERVAL_ENV)))
+        return previous
+
+    _log_outcome(result, config.project_id, previous)
+    _cache.put(key, _Entry(result, now + refresh_interval(GCP_PROJECT_REFRESH_INTERVAL_ENV)))
+    return result
+
+
+def _log_outcome(
+    result: DiscoveryResult,
+    fallback_project: str,
+    previous: DiscoveryResult | None,
+) -> None:
+    """Report a listing at a level matched to whether it is news.
+
+    A success that found the same projects as last time is logged at debug: the
+    TTL makes this the common case, and an info line every interval saying
+    nothing changed is the kind of noise that trains an operator to filter out
+    the line that eventually does matter.
+    """
+    covering = fallback_project or "the default project"
     if result.error:
         # Warning, not error: the deployment still works on its configured
-        # projects. Logged once because the result — failure included — is
-        # cached, so this does not repeat per tool call.
+        # projects. Not repeated per tool call — the failure is cached too.
         logger.warning(
             "GCP project discovery failed for the credential covering %s; "
             "continuing with configured projects only (%s)",
-            fallback_project or "the default project",
+            covering,
             result.error,
         )
-    elif result.truncated:
+        return
+    if result.truncated:
         logger.warning(
             "GCP project discovery returned more than %d projects; the allow-list is "
             "capped there. Name the projects you need in %s instead.",
             MAX_DISCOVERED,
-            "GCP_ADDITIONAL_PROJECTS",
+            GCP_ADDITIONAL_PROJECTS_ENV,
         )
-    else:
-        logger.info(
-            "GCP project discovery: %d project(s) visible to the credential covering %s.",
+        return
+    if previous is not None and previous.projects == result.projects:
+        logger.debug(
+            "GCP project discovery: unchanged at %d project(s) for the credential covering %s.",
             len(result.projects),
-            fallback_project or "the default project",
+            covering,
         )
-    _cache.put(key, result)
-    return result
+        return
+    logger.info(
+        "GCP project discovery: %d project(s) visible to the credential covering %s.",
+        len(result.projects),
+        covering,
+    )
 
 
 def reset_cache() -> None:
-    """Forget every cached listing. For tests, and for a re-read after a regrant."""
+    """Forget every cached listing, so the next call re-lists.
+
+    Used by ``gcp_refresh_discovery`` and by tests. Note what this does *not*
+    do: it discards the last good listing rather than refreshing it, so a
+    forced re-read that then fails falls back to configured-only. That is the
+    right trade for an explicit operator action — it is how you clear a cached
+    failure — but it is why nothing calls this on a timer.
+    """
     _cache.clear()
 
 

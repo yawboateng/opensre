@@ -59,14 +59,44 @@ GCP_INSTANCES_ENV: Final[str] = "GCP_INSTANCES"
 #: cluster worth investigating and several that are not the agent's business.
 GCP_AUTO_REGISTER_GKE_ENV: Final[str] = "GCP_AUTO_REGISTER_GKE"
 
+#: How often to re-run GKE auto-registration, in seconds. ``0`` (or any of the
+#: "off" spellings) keeps the original behaviour: one run at process start.
+#: Only meaningful when :data:`GCP_AUTO_REGISTER_GKE_ENV` is on — this controls
+#: the cadence of a thing that is already opted into, never whether it happens.
+GCP_GKE_REFRESH_INTERVAL_ENV: Final[str] = "GCP_GKE_REFRESH_INTERVAL"
+
+#: How long a Cloud Resource Manager project listing stays fresh, in seconds.
+#: A ceiling on staleness, not a promise of freshness: the re-list happens on
+#: the next tool call after expiry, not on a timer.
+GCP_PROJECT_REFRESH_INTERVAL_ENV: Final[str] = "GCP_PROJECT_REFRESH_INTERVAL"
+
+#: Default for :data:`GCP_PROJECT_REFRESH_INTERVAL_ENV` and
+#: :data:`GCP_GKE_REFRESH_INTERVAL_ENV`. Thirty minutes is chosen against how
+#: often an estate actually changes (rarely) versus how long an operator will
+#: tolerate the agent not seeing a project they just created. The manual
+#: ``gcp_refresh_discovery`` tool exists because no interval is a good answer to
+#: the second question.
+GCP_DEFAULT_REFRESH_INTERVAL_SECONDS: Final[float] = 1800.0
+
+#: Socket timeout for every Google API call, in seconds.
+#: ``httplib2`` — the transport ``google-api-python-client`` uses — takes a
+#: timeout only when the ``Http`` object is *constructed*, and defaults to none.
+#: Without this, a wedged control plane hangs a call forever; on the background
+#: refresh loops that means the loop stops and nothing says so.
+GCP_HTTP_TIMEOUT_SECONDS: Final[float] = 30.0
+
 __all__ = [
     "GCP_ADDITIONAL_PROJECTS_ENV",
     "GCP_AUTO_REGISTER_GKE_ENV",
+    "GCP_DEFAULT_REFRESH_INTERVAL_SECONDS",
     "GCP_DISCOVER_PROJECTS_TOKEN",
+    "GCP_GKE_REFRESH_INTERVAL_ENV",
+    "GCP_HTTP_TIMEOUT_SECONDS",
     "GCP_IMPERSONATE_SERVICE_ACCOUNT_ENV",
     "GCP_INSTANCES_ENV",
     "GCP_MAX_RESULTS_ENV",
     "GCP_PROJECT_ID_ENV",
+    "GCP_PROJECT_REFRESH_INTERVAL_ENV",
     "GCP_SERVICE_ACCOUNT_KEY_ENV",
     "GOOGLE_CLOUD_PROJECT_ENV",
 ]
