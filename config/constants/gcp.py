@@ -38,8 +38,17 @@ GCP_MAX_RESULTS_ENV: Final[str] = "GCP_MAX_RESULTS"
 #: ``docs/multi-instance-integrations.mdx``.
 GCP_INSTANCES_ENV: Final[str] = "GCP_INSTANCES"
 
+#: Opt-in: register discovered GKE clusters as Kubernetes instances at process
+#: start. Off unless set, because it widens what the agent can reach — every
+#: cluster the credential can enumerate in the configured projects becomes a
+#: target for the ``kubernetes_*`` tools, some of which act rather than read.
+#: Accepts ``true`` for every configured project, or the same comma-separated
+#: project grammar the GCP tools take, to narrow it further.
+GCP_AUTO_REGISTER_GKE_ENV: Final[str] = "GCP_AUTO_REGISTER_GKE"
+
 __all__ = [
     "GCP_ADDITIONAL_PROJECTS_ENV",
+    "GCP_AUTO_REGISTER_GKE_ENV",
     "GCP_IMPERSONATE_SERVICE_ACCOUNT_ENV",
     "GCP_INSTANCES_ENV",
     "GCP_MAX_RESULTS_ENV",

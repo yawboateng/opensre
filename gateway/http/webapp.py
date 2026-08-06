@@ -40,6 +40,7 @@ from gateway.http.access_log import install_probe_access_log_filter  # noqa: E40
 from gateway.http.investigations import router as investigations_router  # noqa: E402
 from gateway.runtime.bootstrap import install_runtime  # noqa: E402
 from gateway.runtime.readiness import is_gateway_ready  # noqa: E402
+from integrations.gcp.gke import start_gke_autoregistration  # noqa: E402
 from platform.observability.errors.sentry import capture_exception, init_sentry  # noqa: E402
 from tools.investigation.capability import (  # noqa: E402
     resolve_investigation_context,
@@ -59,6 +60,13 @@ init_sentry(entrypoint="webapp")
 install_probe_access_log_filter()
 
 logger = logging.getLogger(__name__)
+
+# Opt-in and backgrounded (off unless GCP_AUTO_REGISTER_GKE is set). The web
+# process runs investigations too, so it needs the same registered clusters the
+# gateway has — and it gets its own container filesystem, so a cluster added by
+# hand in the gateway pod is invisible here. Backgrounded because discovery is an
+# unbounded remote call and the readiness probe starts at 10s.
+start_gke_autoregistration(logger)
 
 # Cap on POST body size accepted from any caller (authed or not). Realistic
 # alert payloads top out around 50 KB, so 1 MiB is ~20× headroom.

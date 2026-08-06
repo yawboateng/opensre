@@ -19,6 +19,9 @@ Order is load-bearing:
 Sentry and the capability probes sit between them: both are diagnostics, and the
 capability warnings are deliberately emitted at boot so a withheld capability
 reads as a startup warning rather than a confusing mid-turn answer.
+
+GKE auto-registration also sits in that gap, but is not part of the ordering: it
+runs on a background thread and nothing below waits for it.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import logging
 from core.agent_harness.harness import AgentHarness, HarnessConfig
 from core.llm.internal.preload import preload_llm_clients
 from gateway.runtime.bootstrap import install_runtime
+from integrations.gcp.gke import start_gke_autoregistration
 from platform.observability.errors.sentry import init_sentry
 from platform.sandbox.capabilities import boot_capability_warnings
 
@@ -54,6 +58,13 @@ def run(logger: logging.Logger) -> AgentHarness:
 
     for warning in boot_capability_warnings():
         logger.warning("[gateway] capability: %s", warning)
+
+    # Opt-in and backgrounded: the on-disk integration store is ephemeral in a
+    # container, so a GKE cluster registered by hand is gone at the next restart.
+    # Off unless GCP_AUTO_REGISTER_GKE is set. Deliberately not folded into
+    # install_runtime, which also runs for one-shot CLI commands that should not
+    # pay for cluster discovery.
+    start_gke_autoregistration(logger)
 
     # One snapshot at boot, so a code change mid-process cannot leave a
     # mixed-version client graph.

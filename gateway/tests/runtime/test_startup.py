@@ -83,6 +83,31 @@ def test_startup_logs_every_capability_warning(monkeypatch: Any) -> None:
     assert any("network blocked" in line for line in logged), logged
 
 
+def test_startup_kicks_off_gke_autoregistration(monkeypatch: Any) -> None:
+    """The call is the whole feature in a pod.
+
+    Auto-registration decides for itself whether it is opted in, so all boot owes
+    it is the invocation — and if that invocation is ever dropped, every symptom
+    shows up somewhere else entirely: `kubernetes_*` tools quietly missing after
+    a restart, with nothing in the logs to connect it back to here.
+    """
+    from gateway.runtime import startup
+
+    started: list[str] = []
+    monkeypatch.setattr(startup, "install_runtime", lambda **_kw: None)
+    monkeypatch.setattr(startup, "init_sentry", lambda **_kw: None)
+    monkeypatch.setattr(startup, "preload_llm_clients", lambda: None)
+    monkeypatch.setattr(startup, "boot_capability_warnings", lambda: [])
+    monkeypatch.setattr(startup, "_build_harness", _StubHarness)
+    monkeypatch.setattr(
+        startup, "start_gke_autoregistration", lambda _logger: started.append("gke")
+    )
+
+    startup.run(logging.getLogger("test.startup"))
+
+    assert started == ["gke"]
+
+
 def test_startup_returns_the_harness_for_the_caller(monkeypatch: Any) -> None:
     """The gateway keeps the harness it booted; boot does not hide it."""
     from gateway.runtime import startup

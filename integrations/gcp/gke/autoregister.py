@@ -1,0 +1,161 @@
+"""Register discovered GKE clusters when a long-running process starts.
+
+``opensre integrations add-gke-clusters`` writes to the on-disk integration
+store. That is the right place on a workstation and the wrong place in a
+container: the store lives in the container filesystem, so it is lost on every
+restart and invisible to a second replica. Without this module an operator has
+to ``kubectl exec`` into each pod after each rollout, and nothing surfaces the
+omission until an investigation reaches for a ``kubernetes_*`` tool and finds
+none.
+
+**Opt-in, deliberately.** Registering a cluster widens what the agent can reach,
+and some ``kubernetes_*`` tools act rather than read. "Every cluster my
+credential can enumerate is now a target" is a policy decision an operator
+should make explicitly, not a side effect of a boot sequence — so nothing
+happens unless :data:`GCP_AUTO_REGISTER_GKE_ENV` says so. Scope is bounded twice
+over: to the projects that variable names, and to the projects the GCP
+integration is already configured for (``resolve_projects`` rejects anything
+else), so even ``true`` cannot reach an estate nobody configured.
+
+**Runs on a daemon thread.** Discovery is several round trips to
+``container.googleapis.com`` and verification one more per cluster, over an
+httplib2 transport that does not support per-request timeouts. Inline, that puts
+an unbounded remote call in front of the web readiness probe: a slow control
+plane would fail readiness for a reason unrelated to the app. On a daemon thread
+a hung call costs nothing and cannot delay process exit. The cost is a window
+after boot in which the clusters are not yet registered; a turn arriving inside
+it sees the tools as unavailable, which is the same state as not opting in.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+
+from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
+from config.constants.kubernetes import KUBERNETES_INSTANCES_ENV
+from integrations.catalog import resolve_local_classified_integrations
+from integrations.gcp.gke.kubeconfig import AUTH_PLUGIN, plugin_installed
+from integrations.gcp.gke.registration import Outcome, register_gke_clusters
+
+#: Values that mean "off". Unset is off too — the point of an opt-in.
+_DISABLED = frozenset({"", "0", "false", "no", "off"})
+
+#: Values that mean "every configured project", spelled as the wildcard the
+#: shared project grammar already understands rather than a second convention.
+_ENABLED = frozenset({"1", "true", "yes", "on"})
+
+#: ``resolve_projects``' wildcard. Scoped to *configured* projects, not to
+#: everything the credential can see.
+_ALL_CONFIGURED = "*"
+
+#: Distinguishes a cluster this module registered from one an operator added by
+#: hand, so `integrations list-clusters` stays readable and a later change can
+#: reason about which instances it owns.
+_AUTO_TAG = "auto_registered"
+
+_THREAD_NAME = "opensre-gke-autoregister"
+
+
+def requested_projects() -> str | None:
+    """Return the project selector to register, or ``None`` when opted out.
+
+    The returned value is passed straight to ``register_gke_clusters`` as its
+    ``project`` argument, so an operator writing ``GCP_AUTO_REGISTER_GKE=a,b``
+    gets the same grammar — and the same rejection of unconfigured projects —
+    that every GCP tool call already uses.
+    """
+    raw = os.getenv(GCP_AUTO_REGISTER_GKE_ENV, "").strip()
+    folded = raw.lower()
+    if folded in _DISABLED:
+        return None
+    if folded in _ENABLED:
+        return _ALL_CONFIGURED
+    return raw
+
+
+def start_gke_autoregistration(logger: logging.Logger) -> threading.Thread | None:
+    """Begin auto-registration in the background; return the thread, or ``None``.
+
+    ``None`` means the operator did not opt in, which is the default and not a
+    failure. Callers should not join the thread: it exists precisely so that
+    boot does not wait on Google.
+    """
+    selector = requested_projects()
+    if selector is None:
+        return None
+    thread = threading.Thread(
+        target=_run,
+        args=(logger, selector),
+        name=_THREAD_NAME,
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _run(logger: logging.Logger, selector: str) -> None:
+    """Thread body. Never raises: a boot-time convenience must not kill a process."""
+    try:
+        register_now(logger, selector)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("GKE auto-registration failed (%s)", type(exc).__name__)
+
+
+def register_now(logger: logging.Logger, selector: str) -> None:
+    """Discover and register, logging the outcome. Synchronous; may raise."""
+    if os.getenv(KUBERNETES_INSTANCES_ENV, "").strip():
+        # The store overrides the environment for a whole service, not per
+        # instance, so writing even one discovered cluster here would drop every
+        # cluster the operator declared in the env var. Their list is explicit
+        # and ours is inferred; theirs wins, and we do nothing at all.
+        logger.info(
+            "GKE auto-registration skipped: %s is set and is authoritative.",
+            KUBERNETES_INSTANCES_ENV,
+        )
+        return
+
+    if not plugin_installed():
+        # A GKE kubeconfig carries no credential — it execs the plugin to mint a
+        # token. Registering without the plugin stores instances that can never
+        # connect, and the failure would look like a cluster problem.
+        logger.warning(
+            "GKE auto-registration skipped: '%s' is not on PATH, so any kubeconfig "
+            "written would be inert.",
+            AUTH_PLUGIN,
+        )
+        return
+
+    report = register_gke_clusters(
+        resolved=resolve_local_classified_integrations(),
+        project=selector,
+        tags={_AUTO_TAG: "true"},
+    )
+
+    for error in report.errors:
+        logger.warning("GKE auto-registration: %s", error)
+    for result in report.results:
+        if result.outcome is Outcome.REGISTERED:
+            logger.info(
+                "GKE auto-registration: registered %s (%s) as '%s'.",
+                result.cluster,
+                result.project,
+                result.instance,
+            )
+        elif result.outcome is Outcome.FAILED:
+            logger.warning(
+                "GKE auto-registration: %s (%s) failed — %s",
+                result.cluster,
+                result.project,
+                result.detail,
+            )
+    logger.info(
+        "GKE auto-registration finished: registered %d, skipped %d, failed %d.",
+        report.count(Outcome.REGISTERED),
+        report.count(Outcome.SKIPPED),
+        report.count(Outcome.FAILED),
+    )
+
+
+__all__ = ["register_now", "requested_projects", "start_gke_autoregistration"]

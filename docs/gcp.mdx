@@ -78,6 +78,7 @@ The ambient principal needs `roles/iam.serviceAccountTokenCreator` on the target
 | `GCP_IMPERSONATE_SERVICE_ACCOUNT` | — | Service account to impersonate on top of the ambient credential |
 | `GCP_MAX_RESULTS` | `100` | Default page size for log and metric queries (clamped to `1`–`1000`) |
 | `GCP_INSTANCES` | — | JSON array registering several GCP estates, each with its own credential. See [Multiple projects](#multiple-projects) |
+| `GCP_AUTO_REGISTER_GKE` | — | Register discovered GKE clusters at startup. `true` for every configured project, or a comma-separated project list. See [Registering at startup](#registering-at-startup-containers) |
 
 ## Multiple projects
 
@@ -298,7 +299,28 @@ If the endpoint and CA certificate come back empty, grant the principal `roles/c
 Clusters with a **private endpoint only** are reachable from inside their VPC. Run the command from a host with VPC access, or use `--no-verify` to register them for later.
 </Note>
 
-Deploying in a container, where the local store is ephemeral? Declare the clusters in `KUBERNETES_INSTANCES` instead — see [Kubernetes](/kubernetes). `--dry-run` prints the names and contexts you need.
+## Registering at startup (containers)
+
+`add-gke-clusters` writes to the local store, which lives in the container filesystem. In a pod that store is gone at the next restart and invisible to a second replica, so a cluster you register by hand has to be re-registered after every rollout — and nothing tells you it lapsed until an investigation needs a `kubernetes_*` tool.
+
+Set `GCP_AUTO_REGISTER_GKE` and each process registers the clusters itself as it starts:
+
+```bash
+GCP_AUTO_REGISTER_GKE=true              # every configured project
+GCP_AUTO_REGISTER_GKE=prod-a,prod-b     # only these
+```
+
+It is off unless you set it, on purpose: registering a cluster is what makes it reachable by tools that can restart deployments and delete pods, so widening that reach should be a decision you made rather than something a boot sequence did for you. `true` still only covers projects you configured in `GCP_PROJECT_ID` / `GCP_ADDITIONAL_PROJECTS` / `GCP_INSTANCES` — it never enumerates your whole organisation.
+
+Registration runs in the background, so a slow GKE control plane cannot hold up startup or fail a readiness probe. For a few seconds after boot the clusters are not registered yet; a request arriving in that window sees the `kubernetes_*` tools as unavailable.
+
+<Warning>
+Setting `KUBERNETES_INSTANCES` turns startup registration off completely, and this is not a bug. The local store overrides the environment for the whole Kubernetes integration — not cluster by cluster — so writing even one discovered cluster to the store would make every cluster declared in `KUBERNETES_INSTANCES` stop being used. Pick one: `KUBERNETES_INSTANCES` for an explicit list you control, or `GCP_AUTO_REGISTER_GKE` for whatever is out there. The same applies to running `add-gke-clusters` by hand — it warns you before it does it.
+</Warning>
+
+Requirements are the same as for the command: `gke-gcloud-auth-plugin` on PATH (already in the OpenSRE image) and a credential that can reach the clusters. If the plugin is missing, startup registration logs a warning and does nothing rather than storing clusters that could never connect.
+
+Prefer pinning the exact set? Declare the clusters in `KUBERNETES_INSTANCES` — see [Kubernetes](/kubernetes). `add-gke-clusters --dry-run` prints the names and contexts you need.
 
 ## Verify
 
