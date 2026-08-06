@@ -1,0 +1,189 @@
+---
+title: "Google Cloud"
+description: "Connect Google Cloud so OpenSRE can read Cloud Logging and Cloud Monitoring during investigations, across one or many projects"
+---
+
+OpenSRE reads Cloud Logging entries and Cloud Monitoring time series from your Google Cloud projects — including GKE container logs and cluster metrics when no kubeconfig is registered.
+
+This is separate from running the agent's LLM on Vertex AI. `VERTEX_AI_PROJECT` selects the model; `GCP_PROJECT_ID` selects the infrastructure being investigated. Set both if they are different projects.
+
+## Prerequisites
+
+- A Google Cloud project with the **Cloud Logging API**, **Cloud Monitoring API**, and **Cloud Resource Manager API** enabled
+- A principal with `roles/logging.viewer` and `roles/monitoring.viewer` on each project you want to query
+- Network access from the OpenSRE environment to `logging.googleapis.com`, `monitoring.googleapis.com`, and `cloudresourcemanager.googleapis.com`
+
+## Setup
+
+The wizard walks through the three auth paths below and verifies the result:
+
+```bash
+opensre integrations setup gcp
+```
+
+To configure it by hand, set the environment variables directly.
+
+### Option 1: Application Default Credentials (no configuration)
+
+On GKE with Workload Identity, on a GCE VM, or on a laptop where you have run `gcloud auth application-default login`, OpenSRE picks up the ambient credential. Set the project and nothing else:
+
+```bash
+GCP_PROJECT_ID=my-project
+```
+
+<Note>
+On GKE, the Kubernetes service account must carry the `iam.gke.io/gcp-service-account` annotation pointing at your Google service account. Without it the pod silently falls back to the node's `default` compute identity and every call fails with a 403 — and changing the annotation does **not** restart pods, so run `kubectl rollout restart deploy/<name>` afterwards.
+</Note>
+
+### Option 2: Service account key
+
+```bash
+GCP_PROJECT_ID=my-project
+GCP_SERVICE_ACCOUNT_KEY=/secrets/opensre-gcp.json
+```
+
+`GCP_SERVICE_ACCOUNT_KEY` accepts either a path to the JSON file or the JSON document itself, so it works with both mounted secrets and secret-manager env injection.
+
+### Option 3: Impersonation
+
+Keep the ambient credential and impersonate a service account that has the read roles. This reaches other estates without minting long-lived JSON keys:
+
+```bash
+GCP_PROJECT_ID=my-project
+GCP_IMPERSONATE_SERVICE_ACCOUNT=opensre-reader@my-project.iam.gserviceaccount.com
+```
+
+The ambient principal needs `roles/iam.serviceAccountTokenCreator` on the target service account.
+
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GCP_PROJECT_ID` | — | **Required.** Default project every tool call targets. `GOOGLE_CLOUD_PROJECT` is honoured as a fallback |
+| `GCP_ADDITIONAL_PROJECTS` | — | Comma-separated extra projects reachable with the **same** credential |
+| `GCP_SERVICE_ACCOUNT_KEY` | — | Service-account JSON, or a path to it. Leave empty to use Application Default Credentials |
+| `GCP_IMPERSONATE_SERVICE_ACCOUNT` | — | Service account to impersonate on top of the ambient credential |
+| `GCP_MAX_RESULTS` | `100` | Default page size for log and metric queries (clamped to `1`–`1000`) |
+| `GCP_INSTANCES` | — | JSON array registering several GCP estates, each with its own credential. See [Multiple projects](#multiple-projects) |
+
+## Multiple projects
+
+There are two different situations, and they are configured differently.
+
+### One credential, many projects
+
+IAM inherits down the resource hierarchy, so a service account granted a viewer role at the **folder or organization** level already reads every project beneath it. List those projects and OpenSRE will query across them:
+
+```bash
+GCP_PROJECT_ID=acme-prod
+GCP_ADDITIONAL_PROJECTS=acme-staging,acme-data,acme-shared
+```
+
+The agent then passes `project="acme-staging"` on a tool call, `project="acme-data,acme-shared"` for several, or `project="*"` for all of them. Omitting `project` uses `GCP_PROJECT_ID`.
+
+Cloud Logging queries all of them in **one** request, so `project="*"` is the cheap way to trace a request id across an estate.
+
+### Many credentials
+
+When the projects do not share a folder — separate organizations, or a key per environment — register one instance per credential:
+
+```bash
+GCP_INSTANCES='[
+  {"name":"prod","tags":{"env":"prod"},"project_id":"acme-prod","additional_projects":"acme-shared"},
+  {"name":"research","project_id":"acme-research","impersonate_service_account":"ro@acme-research.iam.gserviceaccount.com"}
+]'
+```
+
+Every instance's projects join one flat list, so the agent still picks a **project**, never a credential — OpenSRE maps each project back to the credential that can reach it. The first instance's project is the default.
+
+<Warning>
+A project must be named in `GCP_PROJECT_ID`, `GCP_ADDITIONAL_PROJECTS`, or `GCP_INSTANCES` before a tool will query it. `gcp_list_projects` will happily *show* projects your credential can see at the org level, but querying one requires an operator to add it — this keeps a hallucinated project id from turning into an opaque 403.
+</Warning>
+
+## Investigation tools
+
+### `gcp_logging_query`
+
+Runs a [Cloud Logging filter](https://cloud.google.com/logging/docs/view/logging-query-language) and returns flattened entries — timestamp, severity, message, and the GKE cluster/namespace/pod/container labels when present.
+
+- **`filter`** — the filter expression. Leave the time window out of it; OpenSRE always applies its own bound
+- **`project`** — one project, a comma-separated list, or `*`. Defaults to `GCP_PROJECT_ID`
+- **`severity`** — minimum severity (`DEBUG` through `EMERGENCY`)
+- **`hours`** — lookback window, default `1`, capped at 30 days
+- **`limit`** — page size, default `GCP_MAX_RESULTS`
+
+The message is read from whichever payload field the producer used — `textPayload` for GKE stdout, `jsonPayload` for structured logs, `protoPayload` for Cloud Audit Logs — so audit entries are not returned blank.
+
+### `gcp_monitoring_query`
+
+Reads Cloud Monitoring time series for **one** project per call (unlike logging, the Monitoring API is scoped to a single project).
+
+- **`filter`** — must name a metric type, e.g. `metric.type="kubernetes.io/container/memory/used_bytes"`
+- **`project`** — a single project id
+- **`hours`** — lookback window, default `1`
+- **`alignment_period_seconds`** — downsampling bucket, default `300`
+- **`aligner`** — optional override, e.g. `ALIGN_MAX`
+
+By default the aligner is chosen from the metric's kind: **mean** for gauges, **per-second rate** for counters. Cloud Monitoring rejects a mean over a cumulative metric outright, so a fixed aligner would fail on most counters. The aligner actually used is returned in the result — read rate values as per second, not as raw counts.
+
+### `gcp_list_projects`
+
+Lists the projects the agent may target. Returns the configured set, plus anything a live Resource Manager listing turns up when the credential has folder- or org-level visibility. A missing `resourcemanager.projects.list` permission is not an error — the configured set is still returned.
+
+## Verify
+
+```bash
+opensre integrations verify gcp
+```
+
+Expected output:
+
+```
+SERVICE │ SOURCE    │ STATUS   │ DETAIL
+gcp     │ local env │ ✓ passed │ Connected to GCP project acme-prod (acme-prod) via ADC; scope covers 4 projects.
+```
+
+This makes a real API call, so it catches the case that a shape check cannot: credentials that resolve to the *wrong* principal.
+
+## Example queries
+
+GKE container errors in a namespace:
+
+```
+resource.type="k8s_container" AND resource.labels.namespace_name="payments" AND severity>=ERROR
+```
+
+Everything touching one request, across every configured project (`project="*"`):
+
+```
+trace="projects/acme-prod/traces/0123456789abcdef0123456789abcdef"
+```
+
+Who changed an IAM policy before the incident (Cloud Audit Logs):
+
+```
+protoPayload.methodName="SetIamPolicy"
+```
+
+Container memory for a workload:
+
+```
+metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.namespace_name="payments"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| **403 `IAM_PERMISSION_DENIED`** | The credential resolved but lacks the role. Run `opensre integrations verify gcp` to see which principal is actually in use — on GKE this is usually the node's `default` compute identity, meaning the Workload Identity annotation is missing or the pod predates it. |
+| **`unknown GCP project(s): …`** | The project is not in `GCP_PROJECT_ID`, `GCP_ADDITIONAL_PROJECTS`, or `GCP_INSTANCES`. Add it and restart. |
+| **`The aligner cannot be applied to metrics with kind CUMULATIVE`** | Only happens with an explicit `aligner`. Drop it and let OpenSRE pick, or use `ALIGN_RATE`. |
+| **Empty log results** | Cloud Logging filters are exact-match by default. Confirm the same filter returns rows in **Logs Explorer** over the same window, and remember the window comes from `hours`, not from a `timestamp` clause in the filter. |
+| **Nothing from `gcp_list_projects` beyond what you configured** | The credential lacks `resourcemanager.projects.list`. Harmless — configured projects still work. |
+
+## Security best practices
+
+- Grant only `roles/logging.viewer` and `roles/monitoring.viewer`. The integration is read-only and never writes to your projects.
+- Prefer **Workload Identity** or **impersonation** over service-account keys — neither creates a long-lived credential to rotate.
+- If you must use a key, mount it as a file and point `GCP_SERVICE_ACCOUNT_KEY` at the path rather than putting the JSON in an env var.
+- Scope the viewer role at the project level unless you genuinely want the whole folder readable; `GCP_ADDITIONAL_PROJECTS` decides what OpenSRE queries, but IAM decides what it *could*.

@@ -696,6 +696,12 @@ def _setup_pagerduty() -> None:
     _run_spec_setup(PAGERDUTY_SETUP)
 
 
+def _setup_gcp() -> None:
+    from integrations.gcp.setup import GCP_SETUP
+
+    _run_spec_setup(GCP_SETUP)
+
+
 def _setup_kubernetes() -> None:
     from integrations.kubernetes.setup import KUBERNETES_SETUP
 
@@ -708,6 +714,7 @@ _HANDLERS: dict[str, Any] = {
     "betterstack": _setup_betterstack,
     "coralogix": _setup_coralogix,
     "datadog": _setup_datadog,
+    "gcp": _setup_gcp,
     "groundcover": _setup_groundcover,
     "grafana": _setup_grafana,
     "honeycomb": _setup_honeycomb,

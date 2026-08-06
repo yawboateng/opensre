@@ -45,6 +45,7 @@ INTEGRATION_TOOL_PACKAGES: tuple[str, ...] = (
     "integrations.eks.tools",
     "integrations.elasticsearch.tools",
     "integrations.elb.tools",
+    "integrations.gcp.tools",
     "integrations.github.tools",
     "integrations.gitlab.tools",
     "integrations.google_docs.tools",

@@ -22,9 +22,11 @@ export GRAFANA_INSTANCES='[
 ]'
 ```
 
-Supported env vars: `GRAFANA_INSTANCES`, `DD_INSTANCES`, `GROUNDCOVER_INSTANCES`, `HONEYCOMB_INSTANCES`, `CORALOGIX_INSTANCES`, `AWS_INSTANCES`, `ARGOCD_INSTANCES`, `SPLUNK_INSTANCES`, `KUBERNETES_INSTANCES`.
+Supported env vars: `GRAFANA_INSTANCES`, `DD_INSTANCES`, `GROUNDCOVER_INSTANCES`, `HONEYCOMB_INSTANCES`, `CORALOGIX_INSTANCES`, `AWS_INSTANCES`, `GCP_INSTANCES`, `ARGOCD_INSTANCES`, `SPLUNK_INSTANCES`, `KUBERNETES_INSTANCES`.
 
 For Kubernetes each entry's `credentials` holds `kubeconfig` (inline YAML) or `kubeconfig_path`, plus optional `context` and `namespace` — one entry per cluster (e.g. a GKE cluster per GCP project).
+
+For GCP, use `GCP_INSTANCES` only when the projects need **different credentials**. Projects that one credential already reaches — the usual case, since IAM inherits down folders and organizations — belong in `GCP_ADDITIONAL_PROJECTS` on a single instance instead. See [Google Cloud](/gcp#multiple-projects).
 
 When `<SERVICE>_INSTANCES` is set, the legacy single-instance vars for that service (e.g. `GRAFANA_INSTANCE_URL`, `GRAFANA_READ_TOKEN`) are ignored. If the JSON is invalid the loader logs a warning and falls back to the legacy vars.
 
@@ -110,6 +112,7 @@ picked = select_instance(resolved_integrations, "grafana", tags={"env": "staging
 | Grafana | ✅ | ✅ | ✅ (via `grafana_instance` hint) |
 | Datadog | ✅ | ✅ | Default instance only |
 | AWS | ✅ | ✅ | Default instance only |
+| GCP | ✅ | ✅ | ✅ (per-tool `project` arg + `gcp_list_projects`) |
 | Honeycomb | ✅ | ✅ | Default instance only |
 | Coralogix | ✅ | ✅ | Default instance only |
 | Argo CD | ✅ | ✅ | Default instance only |
@@ -120,7 +123,8 @@ Providers without end-to-end selection fall back to the default (first) instance
 
 ## Known limitations
 
-- Alert-hint selection (`grafana_instance`) is Grafana-only; Kubernetes instead selects per tool call via the `cluster` argument. Extending alert-hint selection to other providers is a follow-up.
+- Alert-hint selection (`grafana_instance`) is Grafana-only; Kubernetes and GCP instead select per tool call, via the `cluster` and `project` arguments. Extending alert-hint selection to other providers is a follow-up.
+- GCP selection is by **project**, not by instance name: every instance's projects join one flat list and OpenSRE maps each project back to the credential that reaches it. Tags are accepted but not yet used for GCP selection.
 - Multi-instance is configured via env vars or direct JSON edit for most providers. Kubernetes additionally has an instance-aware CLI (`opensre integrations add-cluster` / `list-clusters` / `remove-cluster`); the setup wizard for other providers is not yet instance-aware.
 - `verify_integrations` currently validates only the default instance of a multi-instance record.
 - When both the store and env vars configure the same service, the store still wins (existing precedence). To use multi-instance env vars, either remove the store entry for that service or add instances via the store directly.
