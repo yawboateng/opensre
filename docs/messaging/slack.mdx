@@ -330,6 +330,14 @@ single-consumer, so a second gateway holding the same tokens would split events.
 | `SLACK_APP_TOKEN` | App-level token (`xapp-…`) for Socket Mode. Env or integration store. |
 | `SLACK_ALLOWED_USERS` | Comma-separated Slack user IDs allowed to talk to the bot (required unless open workspace). |
 | `SLACK_ALLOW_OPEN_WORKSPACE` | Set to `1` to allow any workspace member (dogfood escape hatch). |
+| `OPENSRE_AGENT_NAME` | Name the bot introduces itself with, signs its footer with, and answers to in a thread. Defaults to `OpenSRE`. |
+
+<Note>
+Renaming the Slack app does not rename the agent — set `OPENSRE_AGENT_NAME` to
+match. OpenSRE cannot read the name from Slack: a bot user's profile keeps the
+old one until the app is reinstalled. See
+[Agent identity](/configuration/environment-variables#agent-identity).
+</Note>
 
 ---
 

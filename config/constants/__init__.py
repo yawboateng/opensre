@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from config.constants.agent_identity import (
+    AGENT_NAME_ENV,
+    DEFAULT_AGENT_NAME,
+    agent_name,
+)
 from config.constants.alertmanager import (
     ALERTMANAGER_BEARER_TOKEN_ENV,
     ALERTMANAGER_PASSWORD_ENV,
@@ -328,6 +333,9 @@ from config.constants.x_mcp import X_MCP_AUTH_TOKEN_ENV, X_MCP_URL_ENV
 __all__ = [
     "RELEASE_STAGE",
     "RELEASE_STAGE_BANNER",
+    "AGENT_NAME_ENV",
+    "DEFAULT_AGENT_NAME",
+    "agent_name",
     "ALERT_TEMPLATE_CHOICES",
     "ALERTMANAGER_BEARER_TOKEN_ENV",
     "ALERTMANAGER_PASSWORD_ENV",

@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+from config.constants.agent_identity import AGENT_NAME_ENV
 from gateway.core.runtime.concurrency import (
     ConcurrencyLimitedTurnHandler,
     TurnConcurrencyGate,
@@ -76,6 +77,29 @@ def test_chat_handler_refuses_excess_turn_without_calling_handler() -> None:
     first.join(1)
 
     assert finalized == ["OpenSRE is at capacity. Please try again shortly."]
+
+
+def test_the_capacity_notice_comes_from_the_named_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is posted into the channel, so it must not name a bot nobody knows."""
+    monkeypatch.setenv(AGENT_NAME_ENV, "AcmeOps")
+    finalized: list[str] = []
+
+    class Sink:
+        def finalize(self, text: str) -> None:
+            finalized.append(text)
+
+    def unreachable_handler(*_args: object) -> None:
+        raise AssertionError("the gate was full; the turn must not have run")
+
+    gate = TurnConcurrencyGate(1)
+    assert gate.try_acquire()  # the only slot is already taken
+    handler = ConcurrencyLimitedTurnHandler(handler=unreachable_handler, gate=gate)
+
+    handler("two", object(), Sink(), logging.getLogger("test"))  # type: ignore[arg-type]
+
+    assert finalized == ["AcmeOps is at capacity. Please try again shortly."]
 
 
 def test_scheduler_runner_waits_for_the_same_chat_capacity() -> None:

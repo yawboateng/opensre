@@ -16,6 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 
+from config.constants.agent_identity import agent_name
 from core.execution import ToolExecutionHooks
 from gateway.core.runtime.status_messages import (
     EMPTY_RESPONSE_MESSAGE,
@@ -34,6 +35,10 @@ SLACK_MAX_MESSAGE_CHARS = 40_000
 # Block Kit markdown blocks cap at 12k chars; longer answers fall back to
 # mrkdwn text, which Slack accepts up to SLACK_MAX_MESSAGE_CHARS.
 SLACK_MAX_MARKDOWN_BLOCK_CHARS = 12_000
+# Provenance footer: says the answer came from a model, and that the reader
+# still owns the facts. Kept to one clause — it sits under every reply, so a
+# long caveat is one people stop reading.
+AI_DISCLOSURE = "AI-generated — verify key details"
 
 logger = logging.getLogger("gateway")
 
@@ -229,7 +234,8 @@ class SlackOutputSink:
         }
 
     def _footer_text(self) -> str:
-        return f"OpenSRE · AI-generated · {_format_duration(time.monotonic() - self._started_at)}"
+        elapsed = _format_duration(time.monotonic() - self._started_at)
+        return f"{agent_name()} · {AI_DISCLOSURE} · {elapsed}"
 
 
 class _TurnStream:

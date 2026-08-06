@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from config.constants.agent_identity import agent_name
 from core.agent_harness.session import SessionCore
 from gateway.core.runtime.sink_protocol import GatewayAgentCallback, GatewaySink
 from platform.deployment_contracts.models import SizeProfile
@@ -53,11 +54,15 @@ class ConcurrencyLimitedTurnHandler:
         *,
         handler: GatewayAgentCallback,
         gate: TurnConcurrencyGate,
-        busy_message: str = "OpenSRE is at capacity. Please try again shortly.",
+        busy_message: str | None = None,
     ) -> None:
         self._handler = handler
         self._gate = gate
-        self._busy_message = busy_message
+        # Resolved here, not as a default argument: a default binds the agent's
+        # name at import, before the process env is necessarily in place.
+        self._busy_message = busy_message or (
+            f"{agent_name()} is at capacity. Please try again shortly."
+        )
 
     def __call__(
         self,
