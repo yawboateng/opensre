@@ -36,6 +36,7 @@ from core.domain.alerts.inbox import (
 ensure_project_platform_package()
 bootstrap_opensre_env_once(override=False)
 
+from gateway.http.access_log import install_probe_access_log_filter  # noqa: E402
 from gateway.http.investigations import router as investigations_router  # noqa: E402
 from gateway.runtime.bootstrap import install_runtime  # noqa: E402
 from gateway.runtime.readiness import is_gateway_ready  # noqa: E402
@@ -52,6 +53,10 @@ from tools.investigation.capability import (  # noqa: E402
 install_runtime(harness_adapters=True, scheduler_runners=False)
 
 init_sentry(entrypoint="webapp")
+
+# Kubernetes probes every few seconds would otherwise bury the access log in
+# identical 200s. Failing probes still log.
+install_probe_access_log_filter()
 
 logger = logging.getLogger(__name__)
 
