@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 
+from config.constants.kubernetes import KUBERNETES_INSTANCES_ENV
 from platform.analytics.cli import (
     capture_integration_removed,
     capture_integration_setup_completed,
@@ -265,6 +268,20 @@ def add_gke_clusters_command(
     except ValueError as exc:
         click.echo(str(exc), err=True)
         raise SystemExit(ERROR) from exc
+
+    if os.getenv(KUBERNETES_INSTANCES_ENV, "").strip() and not dry_run:
+        # The store overrides the environment for the whole kubernetes service,
+        # not per instance, so the first cluster written here makes every cluster
+        # declared in the env var disappear from the effective config. Nothing is
+        # destroyed — clearing the store brings them back — but the loss is
+        # silent, and worth saying out loud before it happens.
+        click.echo(
+            f"Warning: {KUBERNETES_INSTANCES_ENV} is set. Registering a cluster in the "
+            "local store makes the store authoritative for kubernetes, so the clusters "
+            "declared in that variable will stop being used until the store entry is "
+            "removed. Add them to the variable instead to keep one source of truth.",
+            err=True,
+        )
 
     verify = not no_verify
     if not plugin_installed():

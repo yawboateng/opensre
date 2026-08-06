@@ -91,6 +91,7 @@ from config.constants.kubernetes import (
     KUBECONFIG_CONTEXT_ENV,
     KUBECONFIG_NAMESPACE_ENV,
     KUBECONFIG_PATH_ENV,
+    KUBERNETES_INSTANCES_ENV,
 )
 from config.constants.mariadb import (
     MARIADB_DATABASE_ENV,
@@ -1740,7 +1741,7 @@ def load_env_integrations() -> list[dict[str, Any]]:
     # env var — the durable, GitOps-friendly way to run multi-cluster in a pod,
     # where the on-disk store is ephemeral. Falls back to the single-instance
     # KUBECONFIG_* vars when unset. Mirrors GRAFANA_INSTANCES / ARGOCD_INSTANCES.
-    kubernetes_multi = _parse_instances_env("KUBERNETES_INSTANCES", "kubernetes")
+    kubernetes_multi = _parse_instances_env(KUBERNETES_INSTANCES_ENV, "kubernetes")
     if kubernetes_multi is not None:
         integrations.append(kubernetes_multi)
     else:
