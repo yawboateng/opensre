@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from core.execution import ToolExecutionRequest
+from core.execution import ToolExecutionRequest, ToolExecutionResult
 from core.llm.types import ToolCall
 from gateway.core.runtime.approvals import (
     APPROVE_ACTION_ID,
@@ -49,8 +49,8 @@ class _FakeDisplay:
     def details(self, _arguments: Any) -> str:
         return "acme/platform\nmain  ←  fix/drop-orphan"
 
-    def receipt(self, _arguments: Any, _result: Any) -> str:
-        return "Create PR #7"
+    def receipt(self, _arguments: Any, result: Any) -> str:
+        return f"Create PR #{result.get('number', 0)}"
 
 
 class _FakeTool:
@@ -152,6 +152,98 @@ def test_prompt_uses_the_tools_own_wording_when_it_supplies_any() -> None:
     assert client.updates[-1]["text"] == (
         ":white_check_mark: Create PR — drop the orphan — approved by <@U1>"
     )
+
+
+def _result(payload: Any, *, is_error: bool = False) -> ToolExecutionResult:
+    return ToolExecutionResult(content="ok", details=payload, is_error=is_error)
+
+
+def test_the_outcome_is_rewritten_with_what_the_call_produced() -> None:
+    """`#7` does not exist at click time — only after the tool has run."""
+    broker = ApprovalBroker()
+    client = _FakeMessagingClient()
+    hooks = approval_tool_hooks(_prompter(client, broker))
+    _click_later(broker, client, action_id=APPROVE_ACTION_ID)
+    request = _request(_FakeTool(display=_FakeDisplay()))
+    hooks.before_tool_call(request)
+
+    patch = hooks.after_tool_call(request, _result({"ok": True, "number": 7}))
+
+    # The chat message is edited; the model's transcript is left alone.
+    assert patch is None
+    assert client.updates[-1]["ts"] == client.updates[-2]["ts"]
+    assert client.updates[-1]["text"] == ":white_check_mark: Create PR #7 — approved by <@U1>"
+
+
+def test_a_failed_call_leaves_the_approval_outcome_alone() -> None:
+    broker = ApprovalBroker()
+    client = _FakeMessagingClient()
+    hooks = approval_tool_hooks(_prompter(client, broker))
+    _click_later(broker, client, action_id=APPROVE_ACTION_ID)
+    request = _request(_FakeTool(display=_FakeDisplay()))
+    hooks.before_tool_call(request)
+    before = len(client.updates)
+
+    hooks.after_tool_call(request, _result({"ok": False, "error": "boom"}, is_error=True))
+
+    assert len(client.updates) == before
+
+
+def test_a_denied_call_has_no_prompt_left_to_rewrite() -> None:
+    """after_tool_call cannot normally fire here; the bookkeeping must not misfire."""
+    broker = ApprovalBroker()
+    client = _FakeMessagingClient()
+    hooks = approval_tool_hooks(_prompter(client, broker))
+    _click_later(broker, client, action_id=DENY_ACTION_ID)
+    request = _request(_FakeTool(display=_FakeDisplay()))
+    hooks.before_tool_call(request)
+    before = len(client.updates)
+
+    hooks.after_tool_call(request, _result({"ok": True, "number": 7}))
+
+    assert len(client.updates) == before
+
+
+def test_each_receipt_lands_on_its_own_prompt() -> None:
+    """Two approvals in one turn must not have their outcomes crossed."""
+    broker = ApprovalBroker()
+    client = _FakeMessagingClient()
+    prompter = _prompter(client, broker)
+    hooks = approval_tool_hooks(prompter)
+    requests = []
+    for index in (1, 2):
+        request = ToolExecutionRequest(
+            tool_call=ToolCall(id=f"tc-{index}", name="open_github_pull_request", input={}),
+            tool=_FakeTool(display=_FakeDisplay()),  # type: ignore[arg-type]
+            arguments={},
+            source="github",
+            resolved_integrations={},
+        )
+        _click_later(broker, client, action_id=APPROVE_ACTION_ID)
+        hooks.before_tool_call(request)
+        requests.append(request)
+    first_ts, second_ts = client.updates[0]["ts"], client.updates[1]["ts"]
+
+    hooks.after_tool_call(requests[1], _result({"number": 22}))
+    hooks.after_tool_call(requests[0], _result({"number": 11}))
+
+    edits = {update["ts"]: update["text"] for update in client.updates[2:]}
+    assert edits[second_ts].startswith(":white_check_mark: Create PR #22")
+    assert edits[first_ts].startswith(":white_check_mark: Create PR #11")
+
+
+def test_a_tool_without_a_display_gets_no_receipt_edit() -> None:
+    broker = ApprovalBroker()
+    client = _FakeMessagingClient()
+    hooks = approval_tool_hooks(_prompter(client, broker))
+    _click_later(broker, client, action_id=APPROVE_ACTION_ID)
+    request = _request(_FakeTool())
+    hooks.before_tool_call(request)
+    before = len(client.updates)
+
+    hooks.after_tool_call(request, _result({"ok": True}))
+
+    assert len(client.updates) == before
 
 
 def test_tools_without_approval_metadata_run_unprompted() -> None:

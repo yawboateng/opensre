@@ -17,6 +17,7 @@ from gateway.core.runtime.approvals import (
     DENY_ACTION_ID,
     MAX_APPROVAL_WAIT_SECONDS,
     ApprovalBroker,
+    DecidedPrompts,
 )
 from gateway.transports.discord.client import edit_message, send_message_with_components
 
@@ -36,6 +37,7 @@ class DiscordApprovalPrompter:
         self._broker = broker
         self._bot_token = bot_token
         self._channel_id = channel_id
+        self._decided = DecidedPrompts()
 
     def request(
         self,
@@ -77,7 +79,21 @@ class DiscordApprovalPrompter:
             content=_outcome_text(headline, approved=approved, decided_by=decided_by),
             bot_token=self._bot_token,
         )
+        if approved:
+            self._decided.remember(call_id, message_id=message_id, decided_by=decided_by)
         return (approved, decided_by)
+
+    def attach_receipt(self, *, call_id: str, receipt: str) -> None:
+        """Replace the approved prompt's outcome with what the call produced."""
+        decision = self._decided.take(call_id)
+        if decision is None or not receipt.strip():
+            return
+        edit_message(
+            channel_id=self._channel_id,
+            message_id=decision.message_id,
+            content=_outcome_text(receipt, approved=True, decided_by=decision.decided_by)[:2000],
+            bot_token=self._bot_token,
+        )
 
 
 def handle_component_interaction(

@@ -18,6 +18,7 @@ from gateway.core.runtime.approvals import (
     DENY_ACTION_ID,
     MAX_APPROVAL_WAIT_SECONDS,
     ApprovalBroker,
+    DecidedPrompts,
 )
 from gateway.transports.slack.client import SlackMessagingClient
 
@@ -39,6 +40,7 @@ class ThreadApprovalPrompter:
         self._broker = broker
         self._channel_id = channel_id
         self._thread_ts = thread_ts
+        self._decided = DecidedPrompts()
 
     def request(
         self,
@@ -75,6 +77,8 @@ class ThreadApprovalPrompter:
             ts=message_ts,
             text=_outcome_text(headline, approved=approved, decided_by=decided_by),
         )
+        if approved:
+            self._decided.remember(call_id, message_id=message_ts, decided_by=decided_by)
         logger.info(
             "[slack-gateway] approval call=%s approved=%s decided_by=%s",
             call_id,
@@ -82,6 +86,17 @@ class ThreadApprovalPrompter:
             decided_by or "(expired)",
         )
         return (approved, decided_by)
+
+    def attach_receipt(self, *, call_id: str, receipt: str) -> None:
+        """Replace the approved prompt's outcome with what the call produced."""
+        decision = self._decided.take(call_id)
+        if decision is None or not receipt.strip():
+            return
+        self._client.update_message(
+            channel=self._channel_id,
+            ts=decision.message_id,
+            text=_outcome_text(receipt, approved=True, decided_by=decision.decided_by),
+        )
 
 
 def handle_block_actions_payload(
