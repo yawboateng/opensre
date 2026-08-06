@@ -256,7 +256,7 @@ def add_gke_clusters_command(
     The generated kubeconfig stores no credentials — it delegates to
     ``gke-gcloud-auth-plugin``, which must be on PATH.
     """
-    from integrations.catalog import resolve_effective_integrations
+    from integrations.catalog import resolve_local_classified_integrations
     from integrations.gcp.gke import AUTH_PLUGIN, Outcome, plugin_installed, register_gke_clusters
     from platform.common.exit_codes import ERROR, SUCCESS
 
@@ -281,7 +281,12 @@ def add_gke_clusters_command(
         click.echo(f"Warning: {message}", err=True)
 
     report = register_gke_clusters(
-        resolved=resolve_effective_integrations(),
+        # Classified, not "effective": `register_gke_clusters` feeds this to
+        # `gcp_tool_params`, which reads the same flat-config shape the tools
+        # get at runtime. The effective shape nests the config under a "config"
+        # key, and the sanitizer drops what it does not recognise — so passing
+        # it reports "no GCP projects are configured" with GCP_PROJECT_ID set.
+        resolved=resolve_local_classified_integrations(),
         project=project,
         tags=parsed_tags,
         overwrite=overwrite,

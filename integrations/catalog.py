@@ -50,6 +50,17 @@ def resolve_effective_integrations(
     )
 
 
+def resolve_local_classified_integrations(
+    store_integrations: list[dict[str, Any]] | None = None,
+    env_integrations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    _sync_overrides()
+    return _catalog_impl.resolve_local_classified_integrations(
+        store_integrations=store_integrations,
+        env_integrations=env_integrations,
+    )
+
+
 def _env_is_set(name: str) -> bool:
     return bool(os.getenv(name, "").strip())
 
@@ -298,4 +309,5 @@ __all__ = [
     "merge_integrations_by_service",
     "merge_local_integrations",
     "resolve_effective_integrations",
+    "resolve_local_classified_integrations",
 ]
