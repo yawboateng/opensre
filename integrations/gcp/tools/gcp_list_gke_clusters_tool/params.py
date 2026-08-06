@@ -15,7 +15,7 @@ from integrations.gcp.tool_params import gcp_tool_params
 from integrations.selectors import get_instances
 
 
-def registered_clusters(sources: dict[str, dict]) -> list[dict[str, str]]:
+def registered_clusters(sources: dict[str, Any]) -> list[dict[str, str]]:
     """Return ``[{"name", "context"}]`` for every registered Kubernetes instance."""
     entries: list[dict[str, str]] = []
     for instance in get_instances(sources, "kubernetes"):
@@ -23,8 +23,7 @@ def registered_clusters(sources: dict[str, dict]) -> list[dict[str, str]]:
         if not name:
             continue
         config = instance.get("config") or {}
-        context = str(config.get("context", "")).strip() if isinstance(config, dict) else ""
-        entries.append({"name": name, "context": context})
+        entries.append({"name": name, "context": str(config.get("context", "") or "").strip()})
     return entries
 
 

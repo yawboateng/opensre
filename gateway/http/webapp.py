@@ -36,6 +36,7 @@ from core.domain.alerts.inbox import (
 ensure_project_platform_package()
 bootstrap_opensre_env_once(override=False)
 
+from gateway.config.logging_config import configure_logging  # noqa: E402
 from gateway.http.access_log import install_probe_access_log_filter  # noqa: E402
 from gateway.http.investigations import router as investigations_router  # noqa: E402
 from gateway.runtime.bootstrap import install_runtime  # noqa: E402
@@ -58,6 +59,17 @@ init_sentry(entrypoint="webapp")
 # Kubernetes probes every few seconds would otherwise bury the access log in
 # identical 200s. Failing probes still log.
 install_probe_access_log_filter()
+
+# uvicorn attaches handlers to the `uvicorn*` loggers only and leaves the root
+# logger bare, so every application log line below WARNING is swallowed by
+# `logging.lastResort` — the web pod's own output was four uvicorn banner lines
+# and nothing else. The gateway process has always called this; the web process
+# never did, which is why a successful GKE registration here left no trace while
+# the identical code logged normally in the gateway. Idempotent: it no-ops when
+# the root logger already has a handler, so the in-process case
+# (`serve_webapp_in_thread`, where the gateway configured logging first) keeps
+# the gateway's formatting rather than getting a second one.
+configure_logging()
 
 logger = logging.getLogger(__name__)
 

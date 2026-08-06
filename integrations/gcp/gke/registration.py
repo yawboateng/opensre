@@ -23,6 +23,7 @@ from typing import Any
 
 from integrations.gcp.gke.discovery import DiscoveredCluster, discover_clusters
 from integrations.gcp.gke.kubeconfig import build_kubeconfig, credentials_path_for
+from integrations.gcp.gke.scope import ScopeSpec
 from integrations.gcp.projects import resolve_projects
 from integrations.gcp.tool_params import gcp_tool_params, sanitize_config
 from integrations.kubernetes.clusters import add_cluster, list_clusters
@@ -55,6 +56,11 @@ class RegistrationReport:
     #: Project-level discovery failures — a project that could not be listed at
     #: all, as opposed to a cluster that could not be registered.
     errors: list[str] = field(default_factory=list)
+    #: ``cluster (project)`` for every cluster discovery found and the scope
+    #: filtered out. Named rather than counted because the way a cluster filter
+    #: fails is a typo in a cluster name, and "registered 0" on its own gives an
+    #: operator nothing to compare their spelling against.
+    excluded: list[str] = field(default_factory=list)
 
     def count(self, outcome: Outcome) -> int:
         """Return how many clusters ended in ``outcome``."""
@@ -134,6 +140,7 @@ def register_gke_clusters(
     *,
     resolved: dict[str, Any],
     project: str = "",
+    cluster_scope: ScopeSpec | None = None,
     tags: dict[str, str] | None = None,
     overwrite: bool = False,
     verify: bool = True,
@@ -142,7 +149,15 @@ def register_gke_clusters(
     """Discover GKE clusters in ``project`` and register the unregistered ones.
 
     ``project`` follows the same grammar as the GCP tools: empty for the default
-    project, a comma-separated list, or ``*`` for every configured project.
+    project, a comma-separated list, or ``*`` for every configured project. It
+    decides what is *discovered*.
+
+    ``cluster_scope`` decides what is then *registered*, for the case a project holds
+    clusters the agent should not be handed. ``None`` — the default — registers
+    everything discovered. The two must agree about projects or the run is a
+    silent no-op, which is why :attr:`ScopeSpec.project_selector` exists: a
+    caller holding a spec should pass it as ``project`` rather than composing a
+    second list by hand.
 
     Already-registered clusters are skipped by matching on kubeconfig context,
     which makes re-running the command idempotent. A cluster whose *name* is
@@ -165,6 +180,22 @@ def register_gke_clusters(
     clusters, discovery_errors = discover_clusters(projects, project_configs)
     report.errors.extend(discovery_errors)
 
+    if cluster_scope is not None:
+        admitted: list[DiscoveredCluster] = []
+        for cluster in clusters:
+            if cluster_scope.admits(cluster.project, cluster.name):
+                admitted.append(cluster)
+            else:
+                report.excluded.append(f"{cluster.name} ({cluster.project})")
+        clusters = admitted
+
+    # Deliberately after the filter: `_instance_names` qualifies a name only when
+    # two clusters being registered share it, and a cluster the scope excluded is
+    # not being registered. Naming one `prod-acme` because of a `prod` the
+    # operator explicitly kept out would make the scope they asked for change the
+    # name they have to type. Widening the scope later can then collide with the
+    # instance this run created — that path is already handled, by name, with an
+    # `--overwrite` instruction rather than a silent repoint.
     names = _instance_names(clusters)
     by_context, by_name = _existing(list_clusters())
 

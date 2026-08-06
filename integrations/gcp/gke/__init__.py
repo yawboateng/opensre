@@ -8,8 +8,9 @@ reports as ``unregistered_clusters``.
 from __future__ import annotations
 
 from integrations.gcp.gke.autoregister import (
+    env_declares_kubernetes,
     register_now,
-    requested_projects,
+    requested_scope,
     start_gke_autoregistration,
 )
 from integrations.gcp.gke.discovery import DiscoveredCluster, discover_clusters
@@ -20,18 +21,31 @@ from integrations.gcp.gke.registration import (
     RegistrationReport,
     register_gke_clusters,
 )
+from integrations.gcp.gke.scope import (
+    ANY,
+    ClusterScope,
+    ScopeSpec,
+    parse_scopes,
+    scopes_from_cluster_names,
+)
 
 __all__ = [
+    "ANY",
     "AUTH_PLUGIN",
+    "ClusterScope",
     "ClusterRegistration",
     "DiscoveredCluster",
     "Outcome",
     "RegistrationReport",
+    "ScopeSpec",
     "build_kubeconfig",
     "discover_clusters",
+    "env_declares_kubernetes",
+    "parse_scopes",
     "plugin_installed",
     "register_gke_clusters",
     "register_now",
-    "requested_projects",
+    "scopes_from_cluster_names",
+    "requested_scope",
     "start_gke_autoregistration",
 ]

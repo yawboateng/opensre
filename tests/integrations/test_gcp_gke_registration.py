@@ -17,6 +17,7 @@ from integrations.gcp.gke.kubeconfig import (
     plugin_installed,
 )
 from integrations.gcp.gke.registration import Outcome, register_gke_clusters
+from integrations.gcp.gke.scope import parse_scopes
 from integrations.kubernetes.clusters import ClusterResult, ClusterSummary
 
 _CA = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t"
@@ -668,3 +669,112 @@ def test_no_gcp_configured_reports_a_configuration_error(
 
     assert store.calls == []
     assert "GCP_PROJECT_ID" in report.errors[0]
+
+
+# --- cluster scope -----------------------------------------------------------
+
+
+def test_a_scope_registers_only_the_cluster_it_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Project granularity is all-or-nothing; this is the reason the filter exists.
+
+    A project holding one cluster worth investigating and several that are not
+    the agent's business used to force the operator to choose between handing it
+    everything and opting out entirely.
+    """
+    store = _RecordingStore()
+    _install_registration(monkeypatch, store, [_cluster(name="checkout"), _cluster(name="billing")])
+
+    report = register_gke_clusters(
+        resolved=_resolved(), project="acme", cluster_scope=parse_scopes("acme/checkout")
+    )
+
+    assert [call["name"] for call in store.calls] == ["checkout"]
+    assert report.count(Outcome.REGISTERED) == 1
+    assert report.excluded == ["billing (acme)"]
+
+
+def test_no_scope_still_registers_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _RecordingStore()
+    _install_registration(monkeypatch, store, [_cluster(name="checkout"), _cluster(name="billing")])
+
+    report = register_gke_clusters(resolved=_resolved())
+
+    assert sorted(call["name"] for call in store.calls) == ["billing", "checkout"]
+    assert report.excluded == []
+
+
+def test_a_scope_that_matches_nothing_registers_nothing_and_says_what_it_saw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The realistic failure is a typo, and "registered 0" alone does not reveal one."""
+    store = _RecordingStore()
+    _install_registration(monkeypatch, store, [_cluster(name="checkout")])
+
+    report = register_gke_clusters(
+        resolved=_resolved(), project="acme", cluster_scope=parse_scopes("acme/chekout")
+    )
+
+    assert store.calls == []
+    assert report.excluded == ["checkout (acme)"]
+
+
+def test_a_scope_qualifies_by_project_so_a_shared_name_is_not_swept_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two clusters called `prod` in different projects is ordinary, not a request for both."""
+    store = _RecordingStore()
+    _install_registration(
+        monkeypatch,
+        store,
+        [_cluster(name="prod"), _cluster(name="prod", project="acme-staging")],
+    )
+
+    register_gke_clusters(
+        resolved=_resolved(), project="acme,acme-staging", cluster_scope=parse_scopes("acme/prod")
+    )
+
+    assert [(call["name"], call["tags"]["project"]) for call in store.calls] == [("prod", "acme")]
+
+
+def test_a_wildcard_project_scope_takes_the_named_cluster_from_every_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _RecordingStore()
+    _install_registration(
+        monkeypatch,
+        store,
+        [
+            _cluster(name="prod"),
+            _cluster(name="prod", project="acme-staging"),
+            _cluster(name="dev"),
+        ],
+    )
+
+    register_gke_clusters(resolved=_resolved(), project="*", cluster_scope=parse_scopes("*/prod"))
+
+    # Both survive the filter, so the shared name is still ambiguous and both get
+    # qualified — the pre-existing rule, unchanged by scoping.
+    assert sorted(call["name"] for call in store.calls) == ["prod-acme", "prod-acme-staging"]
+
+
+def test_an_excluded_cluster_does_not_force_a_project_suffix_on_the_one_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Names are assigned after filtering, so the scope does not change what you type.
+
+    Qualifying the kept cluster because of one the operator explicitly excluded
+    would mean narrowing the scope silently renames the instance the agent must
+    address.
+    """
+    store = _RecordingStore()
+    _install_registration(
+        monkeypatch,
+        store,
+        [_cluster(name="prod"), _cluster(name="prod", project="acme-staging")],
+    )
+
+    register_gke_clusters(
+        resolved=_resolved(), project="acme,acme-staging", cluster_scope=parse_scopes("acme/prod")
+    )
+
+    assert store.calls[0]["name"] == "prod"

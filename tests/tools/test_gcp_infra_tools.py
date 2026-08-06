@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from integrations.config_models import KubernetesIntegrationConfig
 from integrations.gcp.tools.gcp_audit_log_query_tool import gcp_audit_log_query
 from integrations.gcp.tools.gcp_audit_log_query_tool.filters import (
     build_audit_filter,
@@ -180,6 +181,66 @@ def test_registered_clusters_carries_no_credentials() -> None:
 
     assert entries == [{"name": "default", "context": "gke_acme_us-central1_prod"}]
     assert "SECRET" not in str(entries)
+
+
+def test_registered_clusters_reads_the_context_of_a_named_instance() -> None:
+    """A named instance carries its config as a model, not a dict.
+
+    The test above passes the flat single-instance shape, which is the *only*
+    shape that reaches this function as a plain dict. Declare a cluster under any
+    name but ``default`` — which is what ``KUBERNETES_INSTANCES`` and every
+    auto-registered GKE cluster do — and ``classify_integrations`` publishes
+    ``_all_kubernetes_instances`` with a ``KubernetesIntegrationConfig`` inside.
+
+    Reading ``context`` off that used to yield ``""``, which silently disabled
+    the context-matching half of ``annotate``: a cluster registered under a name
+    that differs from the GKE cluster name got reported to the agent as
+    unregistered, so it never tried the ``kubernetes_*`` tools that would in fact
+    have reached it.
+    """
+    sources = {
+        "kubernetes": KubernetesIntegrationConfig(
+            kubeconfig_path="/etc/kube/config", context="gke_acme_us-central1_prod"
+        ),
+        "_all_kubernetes_instances": [
+            {
+                "name": "utility",
+                "tags": {"env": "utility"},
+                "config": KubernetesIntegrationConfig(
+                    kubeconfig_path="/etc/kube/config", context="gke_acme_us-central1_prod"
+                ),
+                "integration_id": "env-kubernetes",
+            }
+        ],
+    }
+
+    entries = registered_clusters(sources)
+
+    assert entries == [{"name": "utility", "context": "gke_acme_us-central1_prod"}]
+
+
+def test_a_named_instance_matches_the_cluster_it_points_at() -> None:
+    """End to end: the instance name and the cluster name deliberately differ.
+
+    Only the kubeconfig context ties them together, so this fails outright if
+    ``registered_clusters`` drops the context.
+    """
+    clusters = [normalize_cluster(_cluster(), "acme")]
+    sources = {
+        "_all_kubernetes_instances": [
+            {
+                "name": "utility",
+                "tags": {},
+                "config": KubernetesIntegrationConfig(
+                    kubeconfig_path="/etc/kube/config", context="gke_acme_us-central1_prod"
+                ),
+                "integration_id": "env-kubernetes",
+            }
+        ],
+    }
+
+    assert annotate(clusters, registered_clusters(sources)) == []
+    assert clusters[0]["registered_as"] == "utility"
 
 
 # --- GKE tool ----------------------------------------------------------------

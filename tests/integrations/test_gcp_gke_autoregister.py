@@ -8,13 +8,20 @@ from typing import Any
 import pytest
 
 from config.constants.gcp import GCP_AUTO_REGISTER_GKE_ENV
-from config.constants.kubernetes import KUBERNETES_INSTANCES_ENV
+from config.constants.kubernetes import (
+    KUBECONFIG_CONTENT_ENV,
+    KUBECONFIG_CONTEXT_ENV,
+    KUBECONFIG_NAMESPACE_ENV,
+    KUBECONFIG_PATH_ENV,
+    KUBERNETES_INSTANCES_ENV,
+)
 from integrations.gcp.gke import autoregister
 from integrations.gcp.gke.registration import (
     ClusterRegistration,
     Outcome,
     RegistrationReport,
 )
+from integrations.gcp.gke.scope import ANY, ClusterScope, parse_scopes
 
 
 class _Recorder:
@@ -36,7 +43,21 @@ def _resolved() -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(GCP_AUTO_REGISTER_GKE_ENV, raising=False)
-    monkeypatch.delenv(KUBERNETES_INSTANCES_ENV, raising=False)
+    # Every variable that makes the environment declare a kubernetes integration,
+    # not just the instances one. KUBECONFIG especially: it is set on virtually
+    # every developer machine, and the guard reads it, so leaving it in place
+    # would make these tests pass or fail depending on whose laptop ran them.
+    for name in (
+        KUBERNETES_INSTANCES_ENV,
+        KUBECONFIG_PATH_ENV,
+        KUBECONFIG_CONTENT_ENV,
+        KUBECONFIG_CONTEXT_ENV,
+        KUBECONFIG_NAMESPACE_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # The once-per-process guard is module state, so without this the first test
+    # to start a thread would silently suppress every later one.
+    monkeypatch.setattr(autoregister, "_started_thread", None)
 
 
 @pytest.fixture
@@ -54,14 +75,14 @@ def _ready(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
 
 def test_unset_means_off() -> None:
     """The default must be off: registering widens what the agent can reach."""
-    assert autoregister.requested_projects() is None
+    assert autoregister.requested_scope() is None
 
 
 @pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off", "", "   "])
 def test_falsey_values_are_off(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, value)
 
-    assert autoregister.requested_projects() is None
+    assert autoregister.requested_scope() is None
 
 
 @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
@@ -73,13 +94,58 @@ def test_truthy_values_mean_every_configured_project(
     an estate nobody configured."""
     monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, value)
 
-    assert autoregister.requested_projects() == "*"
+    scope = autoregister.requested_scope()
+
+    assert scope is not None
+    assert scope.project_selector == "*"
+    assert not scope.names_clusters
 
 
-def test_a_project_list_is_passed_through_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_project_list_narrows_to_those_projects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "proj-a,proj-b")
 
-    assert autoregister.requested_projects() == "proj-a,proj-b"
+    scope = autoregister.requested_scope()
+
+    assert scope is not None
+    assert scope.project_selector == "proj-a,proj-b"
+    assert scope.admits("proj-a", "anything")
+    assert not scope.admits("proj-c", "anything")
+
+
+def test_a_qualified_entry_narrows_to_one_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason the filter exists: a project holding one cluster worth reaching."""
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "proj-a/checkout")
+
+    scope = autoregister.requested_scope()
+
+    assert scope is not None
+    # Discovery still sweeps the whole project — a cluster cannot be listed by
+    # name alone — but only the named one is registered.
+    assert scope.project_selector == "proj-a"
+    assert scope.admits("proj-a", "checkout")
+    assert not scope.admits("proj-a", "billing")
+
+
+def test_qualified_and_bare_entries_mix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "proj-a/checkout,proj-b")
+
+    scope = autoregister.requested_scope()
+
+    assert scope is not None
+    assert scope.scopes == (ClusterScope("proj-a", "checkout"), ClusterScope("proj-b"))
+
+
+def test_a_wildcard_project_takes_the_named_cluster_anywhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """For an operator who knows the cluster name but not which project holds it."""
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "*/checkout")
+
+    scope = autoregister.requested_scope()
+
+    assert scope is not None
+    assert scope.scopes == (ClusterScope(ANY, "checkout"),)
+    assert scope.project_selector == "*"
 
 
 def test_nothing_starts_when_opted_out(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +174,7 @@ def test_kubernetes_instances_env_stops_registration_entirely(
     monkeypatch.setenv(KUBERNETES_INSTANCES_ENV, '[{"name":"eks-prod","kubeconfig":"..."}]')
 
     with caplog.at_level(logging.INFO):
-        autoregister.register_now(logging.getLogger(__name__), "*")
+        autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
 
     assert _ready.calls == []
     assert KUBERNETES_INSTANCES_ENV in caplog.text
@@ -120,9 +186,86 @@ def test_an_empty_kubernetes_instances_env_does_not_block(
     """Whitespace is not a declared cluster set."""
     monkeypatch.setenv(KUBERNETES_INSTANCES_ENV, "   ")
 
-    autoregister.register_now(logging.getLogger(__name__), "*")
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
 
     assert len(_ready.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["prod-cluster-a", "gke-prod,gke-dev", "[]", "{}", "not json at all"],
+)
+def test_an_unparseable_instances_env_declares_nothing_so_we_still_register(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder, value: str
+) -> None:
+    """Set-but-meaningless must not stand us down.
+
+    ``KUBERNETES_INSTANCES`` is a JSON array of instance objects. Anything else —
+    a bare cluster name is the obvious typo — fails to parse, and the loader
+    falls through to the legacy vars, so the variable contributes **zero**
+    clusters. Standing down for it would leave the operator with neither: no
+    env-declared clusters and no auto-registered ones, from an env var that looks
+    set. Deferring only to config that actually exists is what keeps the guard
+    from being a footgun of its own.
+    """
+    monkeypatch.setenv(KUBERNETES_INSTANCES_ENV, value)
+
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert len(_ready.calls) == 1, _ready.calls
+
+
+def test_an_instance_without_credentials_is_not_a_working_cluster(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """Parseable is not the same as usable.
+
+    ``[{"name": "x", "tags": {...}}]`` with no ``credentials`` parses into a
+    record that looks entirely reasonable, and the classifier then drops it —
+    an instance with no kubeconfig cannot connect to anything. Standing down for
+    it would again leave the operator with neither: no env clusters, no
+    auto-registered ones, no kubernetes integration at all.
+    """
+    monkeypatch.setenv(
+        KUBERNETES_INSTANCES_ENV, '[{"name": "prod-cluster-a", "tags": {"env": "utility"}}]'
+    )
+
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert len(_ready.calls) == 1, _ready.calls
+
+
+def test_an_instance_with_credentials_does_stand_us_down(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """The same entry, once it can actually reach a cluster, is authoritative."""
+    monkeypatch.setenv(
+        KUBERNETES_INSTANCES_ENV,
+        '[{"name": "prod-cluster-a", "tags": {"env": "utility"},'
+        ' "credentials": {"kubeconfig_path": "/etc/kube/config",'
+        ' "context": "gke_p_us-central1_prod-cluster-a", "namespace": "default"}}]',
+    )
+
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert _ready.calls == []
+
+
+def test_a_single_cluster_declared_via_kubeconfig_also_stands_us_down(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """The hazard is the whole-record override, not one variable's name.
+
+    ``KUBECONFIG_CONTENT`` declares a default cluster without
+    ``KUBERNETES_INSTANCES`` being involved, and the store shadows that record
+    exactly as completely. A guard that read one variable name would sail past
+    this and silently disconnect the operator's only cluster.
+    """
+    monkeypatch.setenv(KUBECONFIG_CONTENT_ENV, "apiVersion: v1\nkind: Config\n")
+
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert _ready.calls == []
 
 
 # --- refusing to register instances that cannot work ---------------------------
@@ -140,7 +283,7 @@ def test_a_missing_auth_plugin_stops_registration(
     monkeypatch.setattr(autoregister, "plugin_installed", lambda: False)
 
     with caplog.at_level(logging.WARNING):
-        autoregister.register_now(logging.getLogger(__name__), "*")
+        autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
 
     assert _ready.calls == []
     assert "gke-gcloud-auth-plugin" in caplog.text
@@ -150,18 +293,67 @@ def test_a_missing_auth_plugin_stops_registration(
 
 
 def test_the_selector_and_the_auto_tag_reach_the_registrar(_ready: _Recorder) -> None:
-    autoregister.register_now(logging.getLogger(__name__), "proj-a")
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("proj-a"))
 
     call = _ready.calls[0]
     assert call["project"] == "proj-a"
     assert call["tags"] == {"auto_registered": "true"}
 
 
+def test_the_scope_and_the_projects_it_implies_arrive_together(_ready: _Recorder) -> None:
+    """One spec drives both halves, so discovery cannot sweep what the filter rejects.
+
+    A hand-composed project list beside the filter is the failure worth guarding:
+    it registers nothing and logs no reason.
+    """
+    scope = parse_scopes("proj-a/checkout")
+    autoregister.register_now(logging.getLogger(__name__), scope)
+
+    call = _ready.calls[0]
+    assert call["project"] == "proj-a"
+    assert call["cluster_scope"] is scope
+
+
+def test_an_unqualified_opt_in_sends_a_scope_that_filters_nothing(_ready: _Recorder) -> None:
+    """``GCP_AUTO_REGISTER_GKE=true`` must behave exactly as it did before filtering."""
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert _ready.calls[0]["cluster_scope"].admits("any-project", "any-cluster")
+
+
+def test_clusters_the_scope_passed_over_are_named_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A mistyped cluster name has no other symptom than nothing being registered."""
+    report = RegistrationReport(excluded=["billing (proj-a)", "payments (proj-a)"])
+    monkeypatch.setattr(autoregister, "plugin_installed", lambda: True)
+    monkeypatch.setattr(autoregister, "resolve_local_classified_integrations", _resolved)
+    monkeypatch.setattr(autoregister, "register_gke_clusters", _Recorder(report))
+
+    with caplog.at_level(logging.INFO):
+        autoregister.register_now(logging.getLogger(__name__), parse_scopes("proj-a/chekout"))
+
+    # The value as written next to the names it did not match: enough to spot the
+    # typo without a second discovery run.
+    assert "proj-a/chekout" in caplog.text
+    assert "billing (proj-a)" in caplog.text
+    assert "payments (proj-a)" in caplog.text
+
+
+def test_registering_everything_logs_no_exclusions(
+    _ready: _Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO):
+        autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
+
+    assert "outside" not in caplog.text
+
+
 def test_existing_clusters_are_never_overwritten(_ready: _Recorder) -> None:
     """``overwrite`` stays at its default. Repointing an instance an operator
     already registered would change where every later ``kubernetes_*`` call
     lands, which a boot-time convenience has no business doing."""
-    autoregister.register_now(logging.getLogger(__name__), "*")
+    autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
 
     assert _ready.calls[0].get("overwrite") in (None, False)
 
@@ -177,7 +369,7 @@ def test_the_thread_body_swallows_exceptions(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(autoregister, "register_now", _boom)
 
-    autoregister._run(logging.getLogger(__name__), "*")
+    autoregister._run(logging.getLogger(__name__), parse_scopes("*"))
 
 
 def test_discovery_errors_are_logged_not_raised(
@@ -189,7 +381,7 @@ def test_discovery_errors_are_logged_not_raised(
     monkeypatch.setattr(autoregister, "register_gke_clusters", _Recorder(report))
 
     with caplog.at_level(logging.WARNING):
-        autoregister.register_now(logging.getLogger(__name__), "*")
+        autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
 
     assert "proj-b" in caplog.text
 
@@ -208,7 +400,7 @@ def test_a_failed_cluster_is_reported_with_its_detail(
     monkeypatch.setattr(autoregister, "register_gke_clusters", _Recorder(report))
 
     with caplog.at_level(logging.INFO):
-        autoregister.register_now(logging.getLogger(__name__), "*")
+        autoregister.register_now(logging.getLogger(__name__), parse_scopes("*"))
 
     assert "private endpoint only" in caplog.text
     assert "registered 1, skipped 0, failed 1" in caplog.text
@@ -231,3 +423,45 @@ def test_opting_in_starts_a_daemon_thread(
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert _ready.calls[0]["project"] == "*"
+
+
+def test_a_second_call_reuses_the_first_thread_instead_of_rediscovering(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """Two entry points call in, and the gateway process reaches both.
+
+    ``gateway.runtime.startup`` calls it directly, and importing
+    ``gateway.http.webapp`` calls it at module scope — which the gateway also
+    does, via ``serve_webapp_in_thread``. Registration is idempotent, so the
+    duplicate was harmless in outcome, but it was a second full round of cluster
+    discovery for an answer already known, and it logged a bogus second summary.
+    """
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    logger = logging.getLogger(__name__)
+
+    first = autoregister.start_gke_autoregistration(logger)
+    assert first is not None
+    first.join(timeout=5)
+
+    second = autoregister.start_gke_autoregistration(logger)
+
+    assert second is first
+    assert len(_ready.calls) == 1, _ready.calls
+
+
+def test_opting_out_is_decided_before_the_once_guard(
+    monkeypatch: pytest.MonkeyPatch, _ready: _Recorder
+) -> None:
+    """Turning it off must not be sticky in the other direction either.
+
+    The guard remembers a thread, not a decision, so a call made while opted out
+    records nothing and a later opt-in still runs.
+    """
+    assert autoregister.start_gke_autoregistration(logging.getLogger(__name__)) is None
+
+    monkeypatch.setenv(GCP_AUTO_REGISTER_GKE_ENV, "true")
+    thread = autoregister.start_gke_autoregistration(logging.getLogger(__name__))
+
+    assert thread is not None
+    thread.join(timeout=5)
+    assert len(_ready.calls) == 1, _ready.calls
