@@ -14,7 +14,7 @@ from integrations.gcp.client import (
     build_service,
     describe_api_error,
 )
-from integrations.gcp.projects import group_projects, resolve_projects, resource_names
+from integrations.gcp.projects import group_projects, resolve_projects, resource_name_batches
 from integrations.gcp.tool_params import config_from, gcp_tool_params
 from integrations.gcp.tools.gcp_logging_query_tool.entries import normalize_entries
 from integrations.gcp.tools.gcp_logging_query_tool.filters import build_filter
@@ -107,24 +107,30 @@ def gcp_logging_query(
     entries: list[dict[str, Any]] = []
     truncated = False
 
-    # One request per credential — a single-credential deployment (the common
-    # case) still makes exactly one call no matter how many projects it spans.
+    # One client per credential, and one request per 100 projects under it — a
+    # single-credential deployment of ordinary size is still exactly one call.
     for config_payload, group in group_projects(projects, project_configs):
         try:
             config = config_from(config_payload, fallback_project=group[0])
             service = build_service(config, LOGGING_API)
-            response = (
-                service.entries()
-                .list(
-                    body={
-                        "resourceNames": resource_names(group),
-                        "filter": log_filter,
-                        "orderBy": "timestamp desc",
-                        "pageSize": page_size,
-                    }
+            for batch in resource_name_batches(group):
+                response = (
+                    service.entries()
+                    .list(
+                        body={
+                            "resourceNames": batch,
+                            "filter": log_filter,
+                            "orderBy": "timestamp desc",
+                            "pageSize": page_size,
+                        }
+                    )
+                    .execute()
                 )
-                .execute()
-            )
+                entries.extend(normalize_entries(response.get("entries") or []))
+                # Cloud Logging returns a page token whenever more data exists.
+                # Surfaced so the agent can say "these are the newest N", not
+                # "this is all of it".
+                truncated = truncated or bool(response.get("nextPageToken"))
         except GCPClientError as exc:
             return tool_unavailable("gcp", str(exc), entries=[])
         except Exception as exc:
@@ -143,10 +149,6 @@ def gcp_logging_query(
                 "filter": log_filter,
                 "entries": [],
             }
-        entries.extend(normalize_entries(response.get("entries") or []))
-        # Cloud Logging returns a page token whenever more data exists. Surfaced
-        # so the agent can say "these are the newest N", not "this is all of it".
-        truncated = truncated or bool(response.get("nextPageToken"))
 
     # Each credential returned its own newest-first page; interleave them so the
     # merged result is still newest-first, then re-apply the caller's cap.

@@ -19,8 +19,18 @@ GCP_PROJECT_ID_ENV: Final[str] = "GCP_PROJECT_ID"
 GOOGLE_CLOUD_PROJECT_ENV: Final[str] = "GOOGLE_CLOUD_PROJECT"
 
 #: Comma-separated additional project IDs reachable with the same credential.
-#: Populated automatically when folder/org-level IAM makes discovery possible.
+#: Accepts literal ids, :data:`GCP_DISCOVER_PROJECTS_TOKEN`, or a mix of both.
+#: There is deliberately no ``*`` here: ``*`` is what a *caller* passes to mean
+#: "every configured project", and honouring it as a config value too would
+#: make one character mean both "all of them" and "the set of all of them",
+#: which cannot be resolved without knowing which side wrote it.
 GCP_ADDITIONAL_PROJECTS_ENV: Final[str] = "GCP_ADDITIONAL_PROJECTS"
+
+#: Value for :data:`GCP_ADDITIONAL_PROJECTS_ENV` meaning "ask Cloud Resource
+#: Manager which projects this credential can see, and allow all of them".
+#: A word rather than a symbol because it names an *action* with a latency and
+#: a permission cost (``resourcemanager.projects.list``), not a pattern match.
+GCP_DISCOVER_PROJECTS_TOKEN: Final[str] = "discover"
 
 #: Service-account JSON — either the literal document or a path to it. Ends in
 #: ``_KEY`` so it is keyring-eligible and must be read through
@@ -52,6 +62,7 @@ GCP_AUTO_REGISTER_GKE_ENV: Final[str] = "GCP_AUTO_REGISTER_GKE"
 __all__ = [
     "GCP_ADDITIONAL_PROJECTS_ENV",
     "GCP_AUTO_REGISTER_GKE_ENV",
+    "GCP_DISCOVER_PROJECTS_TOKEN",
     "GCP_IMPERSONATE_SERVICE_ACCOUNT_ENV",
     "GCP_INSTANCES_ENV",
     "GCP_MAX_RESULTS_ENV",

@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from pydantic import AliasChoices, Field, field_validator, model_validator
 
 from config.config import get_tracer_base_url
+from config.constants.gcp import GCP_DISCOVER_PROJECTS_TOKEN
 from config.strict_config import StrictConfigModel
 from integrations._validators import (
     normalize_bearer,
@@ -1192,11 +1193,38 @@ class GCPIntegrationConfig(StrictConfigModel):
         return max(1, min(v, 1000))
 
     @property
+    def discovery_requested(self) -> bool:
+        """Whether :attr:`additional_projects` asks for live Resource Manager lookup.
+
+        Expansion itself lives in :mod:`integrations.gcp.project_discovery` — it
+        is a network call, and this model is validated on paths that must not
+        make one.
+        """
+        return GCP_DISCOVER_PROJECTS_TOKEN in self.additional_projects
+
+    @property
     def all_projects(self) -> list[str]:
-        """Primary project first, then extras, de-duplicated and order-stable."""
+        """Primary project first, then extras, de-duplicated and order-stable.
+
+        The discovery token is a directive and is never emitted as a project id.
+        Leaking it would reproduce the ``"*"`` failure exactly: a name that
+        passes every local check, then fails inside Google — and in Cloud
+        Logging, which validates one request's worth of ``resourceNames``
+        together, takes the real projects down with it.
+
+        Stripped only from :attr:`additional_projects`, which is the only
+        position where it means anything. Filtering :attr:`project_id` too would
+        leave a deployment whose primary project is genuinely named ``discover``
+        with an empty allow-list and no working GCP tool at all.
+        """
+        extras = [
+            project
+            for project in self.additional_projects
+            if project != GCP_DISCOVER_PROJECTS_TOKEN
+        ]
         seen: set[str] = set()
         unique: list[str] = []
-        for project in (self.project_id, *self.additional_projects):
+        for project in (self.project_id, *extras):
             if project and project not in seen:
                 seen.add(project)
                 unique.append(project)

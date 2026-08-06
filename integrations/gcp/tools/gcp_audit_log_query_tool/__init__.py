@@ -27,7 +27,7 @@ from integrations.gcp.client import (
     build_service,
     describe_api_error,
 )
-from integrations.gcp.projects import group_projects, resolve_projects, resource_names
+from integrations.gcp.projects import group_projects, resolve_projects, resource_name_batches
 from integrations.gcp.tool_params import config_from, gcp_tool_params
 from integrations.gcp.tools.gcp_audit_log_query_tool.filters import (
     LOG_TYPES,
@@ -171,22 +171,28 @@ def gcp_audit_log_query(
     records: list[dict[str, Any]] = []
     truncated = False
 
+    # One client per credential, one request per 100 projects under it: Cloud
+    # Logging validates a request's resourceNames as a set, so an estate reached
+    # via GCP_ADDITIONAL_PROJECTS=discover has to be split or none of it answers.
     for config_payload, group in group_projects(projects, project_configs):
         try:
             config = config_from(config_payload, fallback_project=group[0])
             client = build_service(config, LOGGING_API)
-            response = (
-                client.entries()
-                .list(
-                    body={
-                        "resourceNames": resource_names(group),
-                        "filter": audit_filter,
-                        "orderBy": "timestamp desc",
-                        "pageSize": page_size,
-                    }
+            for batch in resource_name_batches(group):
+                response = (
+                    client.entries()
+                    .list(
+                        body={
+                            "resourceNames": batch,
+                            "filter": audit_filter,
+                            "orderBy": "timestamp desc",
+                            "pageSize": page_size,
+                        }
+                    )
+                    .execute()
                 )
-                .execute()
-            )
+                records.extend(normalize_records(response.get("entries") or []))
+                truncated = truncated or bool(response.get("nextPageToken"))
         except GCPClientError as exc:
             return tool_unavailable("gcp", str(exc), records=[])
         except Exception as exc:
@@ -206,8 +212,6 @@ def gcp_audit_log_query(
                 "filter": audit_filter,
                 "records": [],
             }
-        records.extend(normalize_records(response.get("entries") or []))
-        truncated = truncated or bool(response.get("nextPageToken"))
 
     # Each credential returned its own newest-first page; interleave so the
     # merged timeline is still newest-first, then re-apply the caller's cap.

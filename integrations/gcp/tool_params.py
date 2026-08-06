@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from integrations.config_models import GCPIntegrationConfig
+from integrations.gcp.project_discovery import discover, literal_projects, wants_discovery
 from integrations.selectors import get_instances
 
 #: Only real model fields survive rehydration. ``availability_view`` stamps
@@ -40,11 +41,24 @@ def sanitize_config(raw: object) -> dict[str, Any]:
 
 
 def _projects_of(config: dict[str, Any]) -> list[str]:
-    extra = config.get("additional_projects") or []
-    items = extra.split(",") if isinstance(extra, str) else extra
-    if not isinstance(items, (list, tuple)):
-        items = []
-    return [str(config.get("project_id", "") or ""), *(str(item).strip() for item in items)]
+    """Project ids this instance names, primary first. Never the discovery token."""
+    extra = config.get("additional_projects")
+    return [str(config.get("project_id", "") or ""), *literal_projects(extra)]
+
+
+def _discovered_for(config: dict[str, Any], fallback_project: str) -> list[str]:
+    """Projects live discovery adds for this instance, or none.
+
+    Failure degrades to the configured list rather than raising: an allow-list
+    that a transient Google error can empty would take the whole GCP toolset
+    down with it, and the configured projects are still a correct — if narrower
+    — answer. :func:`~integrations.gcp.project_discovery.discover` logs the
+    reason once per credential.
+    """
+    if not wants_discovery(config.get("additional_projects")):
+        return []
+    built = config_from(config, fallback_project=fallback_project)
+    return list(discover(built).projects)
 
 
 def gcp_tool_params(sources: dict[str, dict]) -> dict[str, Any]:
@@ -53,6 +67,15 @@ def gcp_tool_params(sources: dict[str, dict]) -> dict[str, Any]:
     Walks every registered GCP instance so a deployment with one credential per
     estate presents a single flat project namespace to the model — it picks a
     project, not a credential.
+
+    This is also where ``GCP_ADDITIONAL_PROJECTS=discover`` is expanded, because
+    it is the one place every GCP tool *and* GKE auto-registration reads its
+    scope from — expanding anywhere further out would leave one of them with a
+    different idea of what is in scope than the others. ``extract_params`` runs
+    only when a tool actually executes (never on the per-turn planning path, see
+    :func:`~integrations.gcp.availability.gcp_available`) and discovery is
+    memoized per credential, so the cost is one Resource Manager call per
+    process, paid by the first GCP tool call.
     """
     project_configs: dict[str, dict[str, Any]] = {}
     default_project = ""
@@ -66,6 +89,10 @@ def gcp_tool_params(sources: dict[str, dict]) -> dict[str, Any]:
         if not default_project:
             default_project = projects[0]
             limit = int(config.get("max_results") or _DEFAULT_LIMIT)
+        # Appended, not prepended: the primary project must stay first so
+        # ``default_project`` above is the operator's choice and not whichever
+        # project Resource Manager happened to return first.
+        projects.extend(_discovered_for(config, projects[0]))
         for project in projects:
             # First instance wins: two credentials naming the same project is a
             # configuration accident, not a request to query it twice.
