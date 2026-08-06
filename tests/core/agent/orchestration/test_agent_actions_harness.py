@@ -12,7 +12,7 @@ from rich.console import Console
 import surfaces.interactive_shell.runtime.slash_adapter as slash_adapter
 from core.agent_harness.accounting.turn_accounting import DefaultTurnAccounting
 from core.agent_harness.ports import AnswerRequest
-from core.agent_harness.prompts.prior_investigation import (
+from core.agent_harness.prompts.memory.prior_investigation import (
     PRIOR_INVESTIGATION_RECALL_SECONDS,
 )
 from core.agent_harness.turns.action_driver import (
@@ -24,6 +24,7 @@ from core.agent_harness.turns.action_driver import (
 )
 from core.agent_harness.turns.orchestrator import run_turn
 from core.agent_harness.turns.turn_results import ToolCallingTurnResult
+from core.llm.types import AgentLLMResponse, ToolCall
 from core.tool_framework.registered_tool import RegisteredTool
 from surfaces.interactive_shell.runtime.action_turn import run_action_tool_turn
 from surfaces.interactive_shell.session import Session
@@ -311,6 +312,171 @@ def test_tool_response_text_overrides_chatty_final_text() -> None:
     assert "No open findings found; no PR was created." in printed
     assert "Next steps" not in printed
     assert "Pick a specific alert" not in result.response_text
+
+
+def _fake_shell_run_tool() -> RegisteredTool:
+    def _run_fake_shell(command: str, quiet: bool = False) -> dict[str, Any]:
+        _ = quiet
+        return {
+            "ok": True,
+            "command": command,
+            "stdout": f"{command} done",
+            "stderr": "",
+            "exit_code": 0,
+        }
+
+    return RegisteredTool(
+        name="shell_run",
+        description="Fake shell runner.",
+        input_schema={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        source="interactive_shell",
+        surfaces=("action",),
+        run=_run_fake_shell,
+    )
+
+
+def _shell_step_response(step: int, command: str) -> AgentLLMResponse:
+    return AgentLLMResponse(
+        content="",
+        tool_calls=[
+            ToolCall(id=f"call_shell_run_{step}", name="shell_run", input={"command": command})
+        ],
+        raw_content=None,
+    )
+
+
+def test_multi_step_shell_chain_shows_grounded_closing_summary() -> None:
+    """A chained multi-step shell workflow ends with the agent's summary.
+
+    ``shell_run`` results carry stdout/exit codes back to the model, so after a
+    sequential chain the closing summary is grounded in observed output. It
+    used to be dropped with the generic self-recording suppression, leaving
+    workflow turns to end silently on the last step's raw output.
+    """
+    summary = (
+        "All 2 steps complete — running total persisted after each step; "
+        "checkpoint saved to /tmp/demo_state.json."
+    )
+    harness = ActionExecutionHarness(
+        llm=FakeActionLLM(
+            [
+                _shell_step_response(1, "step-1 >> state"),
+                _shell_step_response(2, "step-2 >> state"),
+                no_tool_response(summary),
+            ]
+        )
+    )
+
+    result = ActionTurnRunner(
+        output=_OutputSink(harness.console),
+        tools=_GenericActionToolProvider(_fake_shell_run_tool()),
+        deps=harness.deps,
+    ).run("run 2 sequential steps updating a running total", Session(), is_tty=False)
+
+    assert result.handled is True
+    assert result.response_text == summary
+    # The test console wraps at 100 columns; compare whitespace-normalized.
+    printed = " ".join(harness.console_buffer.getvalue().split())
+    assert summary in printed
+
+
+def test_single_shell_run_keeps_model_closing_suppressed() -> None:
+    """One shell command still drops the closing so it cannot contradict output."""
+    lied = (
+        "The disk check passed and everything is completely healthy — no issues found anywhere. ✅"
+    )
+    harness = ActionExecutionHarness(
+        llm=FakeActionLLM(
+            [
+                _shell_step_response(1, "df -h"),
+                no_tool_response(lied),
+            ]
+        )
+    )
+
+    result = ActionTurnRunner(
+        output=_OutputSink(harness.console),
+        tools=_GenericActionToolProvider(_fake_shell_run_tool()),
+        deps=harness.deps,
+    ).run("check disk usage", Session(), is_tty=False)
+
+    assert result.handled is True
+    assert lied not in result.response_text
+    assert lied not in harness.console_buffer.getvalue()
+
+
+def _fake_slash_invoke_tool() -> RegisteredTool:
+    def _run_fake_slash(command: str, args: list[str] | None = None) -> dict[str, Any]:
+        line = " ".join([command, *(args or [])])
+        return {"ok": True, "output": f"{line} output"}
+
+    return RegisteredTool(
+        name="slash_invoke",
+        description="Fake slash dispatcher.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        source="interactive_shell",
+        surfaces=("action",),
+        run=_run_fake_slash,
+    )
+
+
+def _slash_step_response(step: int, command: str, args: list[str]) -> AgentLLMResponse:
+    return AgentLLMResponse(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id=f"call_slash_invoke_{step}",
+                name="slash_invoke",
+                input={"command": command, "args": args},
+            )
+        ],
+        raw_content=None,
+    )
+
+
+def test_discover_then_act_slash_chain_shows_grounded_closing_summary() -> None:
+    """A list-then-remove slash chain ends with the agent's grounded summary.
+
+    ``slash_invoke`` observations carry the captured command output back to the
+    model (task ids from ``/cron list``), so after a discover-then-act chain the
+    closing summary is grounded like a shell chain's — it must not be dropped by
+    the generic self-recording suppression.
+    """
+    summary = "Removed both scheduled cron tasks (ecf7c2580b83, ac9446c4b3eb)."
+    harness = ActionExecutionHarness(
+        llm=FakeActionLLM(
+            [
+                _slash_step_response(1, "/cron", ["list"]),
+                _slash_step_response(2, "/cron", ["remove", "ecf7c2580b83"]),
+                _slash_step_response(3, "/cron", ["remove", "ac9446c4b3eb"]),
+                no_tool_response(summary),
+            ]
+        )
+    )
+
+    result = ActionTurnRunner(
+        output=_OutputSink(harness.console),
+        tools=_GenericActionToolProvider(_fake_slash_invoke_tool()),
+        deps=harness.deps,
+    ).run("remove the existing cron loops", Session(), is_tty=False)
+
+    assert result.handled is True
+    assert result.response_text == summary
+    printed = " ".join(harness.console_buffer.getvalue().split())
+    assert summary in printed
 
 
 def test_literal_slash_command_dispatches_deterministically_without_llm(
@@ -951,7 +1117,10 @@ def test_turn_resolved_integrations_trusts_plan_without_reresolving(
     monkeypatch.setattr(
         "core.agent_harness.turns.action_driver.resolve_and_cache_integrations", _must_not_run
     )
-    snapshot = replace(TurnSnapshot.from_session("q", Session()), resolved_integrations={})
+    snapshot = replace(
+        TurnSnapshot.from_session("q", Session(), surface="interactive_shell"),
+        resolved_integrations={},
+    )
     plan = TurnPlan(snapshot=snapshot)
 
     assert _turn_resolved_integrations(Session(), plan) == {}

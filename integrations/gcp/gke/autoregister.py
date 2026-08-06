@@ -69,8 +69,8 @@ _AUTO_TAG = "auto_registered"
 _THREAD_NAME = "opensre-gke-autoregister"
 
 #: The one run this process gets, and the lock that makes "check then start"
-#: atomic. Two entry points call in — ``gateway.runtime.startup`` and the import
-#: of ``gateway.http.webapp`` — and the gateway process hits *both*, because it
+#: atomic. Two entry points call in — ``gateway.core.runtime.startup`` and the import
+#: of ``gateway.web.webapp`` — and the gateway process hits *both*, because it
 #: serves the web app in a thread (``serve_webapp_in_thread``). Neither caller
 #: can know about the other, so the invariant "one registration per process"
 #: belongs here rather than in a guard each of them repeats.

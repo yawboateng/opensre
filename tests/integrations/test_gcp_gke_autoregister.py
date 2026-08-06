@@ -430,8 +430,8 @@ def test_a_second_call_reuses_the_first_thread_instead_of_rediscovering(
 ) -> None:
     """Two entry points call in, and the gateway process reaches both.
 
-    ``gateway.runtime.startup`` calls it directly, and importing
-    ``gateway.http.webapp`` calls it at module scope — which the gateway also
+    ``gateway.core.runtime.startup`` calls it directly, and importing
+    ``gateway.web.webapp`` calls it at module scope — which the gateway also
     does, via ``serve_webapp_in_thread``. Registration is idempotent, so the
     duplicate was harmless in outcome, but it was a second full round of cluster
     discovery for an answer already known, and it logged a bogus second summary.

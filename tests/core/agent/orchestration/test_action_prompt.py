@@ -17,8 +17,8 @@ from core.agent_harness.prompts.assistant import (
     build_cli_agent_prompt_from_provider,
     build_handoff_guidance_block,
 )
-from core.agent_harness.prompts.conversation_memory import NO_HISTORY_PLACEHOLDER
-from core.agent_harness.prompts.skills_loader import (
+from core.agent_harness.prompts.memory.conversation import NO_HISTORY_PLACEHOLDER
+from core.agent_harness.prompts.skills.loader import (
     SKILLS_HEADER,
     list_action_skills,
     load_skill_body,
@@ -26,7 +26,7 @@ from core.agent_harness.prompts.skills_loader import (
     load_skills_index,
     skills_dir,
 )
-from core.agent_harness.prompts.skills_loader import (
+from core.agent_harness.prompts.skills.loader import (
     load_skills_block as cached_load_skills_block,
 )
 from core.agent_harness.turns.turn_snapshot import TurnSnapshot
@@ -188,24 +188,27 @@ def test_skills_loader_routes_star_history_away_from_github_cli() -> None:
     assert "undercount" in body or "false zeros" in body
 
 
-def test_system_prompt_bans_shell_placeholders_on_multisource_rca() -> None:
-    """Multi-source crash RCA must be investigation_start alone (scenario 314)."""
-    prompt = _SYSTEM_PROMPT_BASE.lower()
-    assert "emit only investigation_start" in prompt
+def test_system_prompt_bans_shell_placeholders_on_multisource_diagnosis() -> None:
+    """Multi-source crash diagnosis is a single assistant_handoff (scenario 314)."""
+    prompt = " ".join(_SYSTEM_PROMPT_BASE.lower().split())
+    assert "do not emit investigation_start for a diagnostic question" in prompt
     assert "never invent placeholder shell commands" in prompt
     assert "posthog query requested" in prompt
     assert "never use shell_run as a stand-in for querying observability sources" in prompt
     composed = " ".join(build_action_system_prompt(_ctx()).lower().split())
-    assert "investigation_start only" in composed
-    assert "alone or paired with investigation_start" in composed
+    assert "assistant_handoff only" in composed
+    assert "alone or paired with the handoff" in composed
 
 
 def test_system_prompt_keeps_bare_alert_blob_as_handoff() -> None:
-    prompt = _SYSTEM_PROMPT_BASE.lower()
-    assert "a bare pasted alert blob with no instruction remains assistant_handoff" in prompt
+    prompt = " ".join(_SYSTEM_PROMPT_BASE.lower().split())
+    assert (
+        "an implicit diagnostic cause question and a bare pasted alert blob "
+        "remain assistant_handoff" in prompt
+    )
     assert "pasted alert blob / bare incident statement" in prompt
-    assert "with no\ninstruction" in prompt
-    assert "not such a question — hand it off" in prompt
+    assert "with no instruction and no diagnostic question" in prompt
+    assert "is not a diagnostic question; it is also assistant_handoff" in prompt
 
 
 def test_system_prompt_hands_off_when_delivery_tool_unavailable() -> None:
@@ -263,7 +266,7 @@ def test_morning_report_skill_closes_with_schedule_offer() -> None:
     """A run-once morning report without an offer cannot drive repeat usage."""
     load_skills_block.cache_clear()
     body = " ".join(
-        (skills_dir() / "morning_report.md").read_text(encoding="utf-8").lower().split()
+        (skills_dir() / "morning_report" / "SKILL.md").read_text(encoding="utf-8").lower().split()
     )
     assert "propose_scheduled_delivery" in body
     assert "daily_summary" in body
@@ -354,7 +357,7 @@ def test_skills_loader_bundles_github_security_fix_skill() -> None:
     skill = skills_dir() / "github_security_fix" / "SKILL.md"
     assert skill.is_file()
 
-    # Index carries the one-line catalog; the playbook loads on demand, so the
+    # Index carries the one-line catalog; the skill body loads on demand, so the
     # detailed assertions from #4727 belong against the body, not the block.
     assert "github-security-fix" in load_skills_index()
     body = load_skill_body("github-security-fix")
@@ -644,7 +647,7 @@ def test_scheduling_is_never_offered_without_asking_first() -> None:
     load_skills_block.cache_clear()
     base = " ".join(_SYSTEM_PROMPT_BASE.lower().split())
     skill = " ".join(
-        (skills_dir() / "morning_report.md").read_text(encoding="utf-8").lower().split()
+        (skills_dir() / "morning_report" / "SKILL.md").read_text(encoding="utf-8").lower().split()
     )
 
     # Assert — structured propose tool; creation waits on confirm / yes
@@ -679,14 +682,83 @@ def test_the_active_instruction_survives_context_truncation() -> None:
 def test_the_cron_guidance_teaches_structured_schedule_offers() -> None:
     """Morning report must propose via tool, not scrape Want-me-to into /cron."""
     # Arrange
-    from core.agent_harness.prompts.skills_loader import skills_dir
+    from core.agent_harness.prompts.skills.loader import skills_dir
 
     base = " ".join(_SYSTEM_PROMPT_BASE.lower().split())
     skill = " ".join(
-        (skills_dir() / "morning_report.md").read_text(encoding="utf-8").lower().split()
+        (skills_dir() / "morning_report" / "SKILL.md").read_text(encoding="utf-8").lower().split()
     )
 
     assert "propose_scheduled_delivery" in base
     assert "propose_scheduled_delivery" in skill
     assert "omit chat_id" in skill
     assert 'provider="slack"' in skill or "provider='slack'" in skill
+
+
+# ── WAL: interrupted-turn recovery injection ─────────────────────────────────
+
+
+def test_interrupted_turn_recovery_block_rides_the_ephemeral_tier() -> None:
+    """The recovery note lands in the ephemeral half; the cached half is unchanged.
+
+    Cache stability is the design constraint: the note rides exactly one turn,
+    so it must never touch the byte-stable cached system prefix.
+    """
+    import dataclasses
+
+    from core.agent_harness.prompts.action.assemble import (
+        build_action_system_prompt_envelope,
+        interrupted_turn_recovery_block,
+    )
+
+    note = (
+        "A previous turn in this session was interrupted while tool calls were "
+        "still executing (no result was recorded for them):\n"
+        "- shell_run step-2 >> /tmp/demo_state.json (step 2)"
+    )
+    with_note = dataclasses.replace(_ctx(), recovery_note=note)
+
+    assert interrupted_turn_recovery_block(_ctx()) == ""
+    block = interrupted_turn_recovery_block(with_note)
+    assert "INTERRUPTED-TURN RECOVERY" in block
+    assert "shell_run step-2 >> /tmp/demo_state.json (step 2)" in block
+
+    envelope_with = build_action_system_prompt_envelope(with_note)
+    envelope_without = build_action_system_prompt_envelope(_ctx())
+    assert envelope_with.render_cached() == envelope_without.render_cached()
+    assert "INTERRUPTED-TURN RECOVERY" in envelope_with.render_ephemeral()
+    assert "INTERRUPTED-TURN RECOVERY" not in envelope_without.render()
+    assert "INTERRUPTED-TURN RECOVERY" in envelope_with.render()
+
+
+def test_from_session_pops_the_pending_recovery_note() -> None:
+    """The note is consumed by the first snapshot and never rides a second turn."""
+    from types import SimpleNamespace
+
+    session = SimpleNamespace(
+        cli_agent_messages=[],
+        configured_integrations=(),
+        configured_integrations_known=False,
+        last_state=None,
+        last_synthetic_observation_path=None,
+        reasoning_effort=None,
+        pending_recovery_note="previous turn was interrupted while executing shell_run step-2",
+    )
+
+    first = TurnSnapshot.from_session("continue", session, surface=None)
+    second = TurnSnapshot.from_session("next", session, surface=None)
+
+    assert first.recovery_note is not None
+    assert "shell_run step-2" in first.recovery_note
+    assert session.pending_recovery_note is None
+    assert second.recovery_note is None
+
+
+def test_sequential_steps_rule_teaches_two_phase_state_writes() -> None:
+    """Task-level WAL: the state file records started/committed per step."""
+    prompt = " ".join(_SYSTEM_PROMPT_BASE.lower().split())
+    assert "two-phase" in prompt
+    assert "`step n: started`" in prompt
+    assert "`step n: committed`" in prompt
+    assert "started-but-uncommitted step is re-run" in prompt
+    assert "committed steps are never redone" in prompt
