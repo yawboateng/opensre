@@ -26,6 +26,7 @@ from integrations.github.tools.github_cli.credentials import (
     github_source_available,
     resolve_github_token,
 )
+from integrations.github.tools.pull_request_approval import PULL_REQUEST_APPROVAL_DISPLAY
 from integrations.github.write_errors import GitHubWriteError
 
 ERR_TOKEN = "github_token_missing"
@@ -139,9 +140,9 @@ def _failure(kind: str, message: str, *, branch: str = "", branch_created: bool 
     side_effect_level="mutating",
     requires_approval=True,
     approval_reason="Creates a branch, commits file changes, and opens a pull request on GitHub.",
-    # Identity first, payload last: the approval prompt truncates the rendered
-    # arguments at 400 characters, and the reviewer needs repo/branch/title far
-    # more than the first few lines of a file.
+    # Renders the approval prompt as a pull request rather than a field dump;
+    # see integrations/github/tools/pull_request_approval.py.
+    approval_display=PULL_REQUEST_APPROVAL_DISPLAY,
     input_schema={
         "type": "object",
         "properties": {

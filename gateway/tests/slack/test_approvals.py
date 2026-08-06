@@ -40,13 +40,27 @@ class _FakeMessagingClient:
         return True
 
 
+class _FakeDisplay:
+    """A tool rendering its own prompt, as ``open_github_pull_request`` does."""
+
+    def headline(self, _arguments: Any) -> str:
+        return "Create PR — drop the orphan"
+
+    def details(self, _arguments: Any) -> str:
+        return "acme/platform\nmain  ←  fix/drop-orphan"
+
+    def receipt(self, _arguments: Any, _result: Any) -> str:
+        return "Create PR #7"
+
+
 class _FakeTool:
     """Minimal stand-in carrying the approval metadata the hook reads."""
 
-    def __init__(self, *, requires_approval: bool = True) -> None:
+    def __init__(self, *, requires_approval: bool = True, display: Any = None) -> None:
         self.requires_approval = requires_approval
         self.approval_reason = "Sends a message to Slack on your behalf."
         self.approval_expiry_seconds = 60
+        self.approval_display = display
 
 
 def _request(tool: _FakeTool, name: str = "slack_send_message") -> ToolExecutionRequest:
@@ -122,6 +136,24 @@ def test_denied_click_blocks_the_tool_with_no_retry_guidance() -> None:
     assert client.updates[-1]["text"].startswith(":no_entry:")
 
 
+def test_prompt_uses_the_tools_own_wording_when_it_supplies_any() -> None:
+    """The regression: a field dump told the reviewer nothing about the change."""
+    broker = ApprovalBroker()
+    client = _FakeMessagingClient()
+    hooks = approval_tool_hooks(_prompter(client, broker))
+    _click_later(broker, client, action_id=APPROVE_ACTION_ID)
+
+    hooks.before_tool_call(_request(_FakeTool(display=_FakeDisplay())))
+
+    section = client.posts[-1]["blocks"][0]["text"]["text"]
+    assert "Create PR — drop the orphan" in section
+    assert "main  ←  fix/drop-orphan" in section
+    # The outcome names the action, not the tool's internal identifier.
+    assert client.updates[-1]["text"] == (
+        ":white_check_mark: Create PR — drop the orphan — approved by <@U1>"
+    )
+
+
 def test_tools_without_approval_metadata_run_unprompted() -> None:
     broker = ApprovalBroker()
     client = _FakeMessagingClient()
@@ -139,9 +171,10 @@ def test_unanswered_prompt_expires_to_deny() -> None:
     prompter = _prompter(client, broker)
 
     approved, decided_by = prompter.request(
-        tool_name="slack_send_message",
+        call_id="tc-1",
+        headline="slack_send_message",
         reason="reason",
-        arguments={},
+        details="",
         expiry_seconds=0.05,
     )
 

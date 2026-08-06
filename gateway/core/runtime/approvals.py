@@ -149,12 +149,37 @@ class ApprovalPrompter(Protocol):
     def request(
         self,
         *,
-        tool_name: str,
+        call_id: str,
+        headline: str,
         reason: str,
-        arguments: Mapping[str, Any],
+        details: str,
         expiry_seconds: float,
     ) -> tuple[bool, str]:
         """Return (approved, id of the member who decided; empty when expired)."""
+
+
+def tool_headline(tool: Any, tool_name: str, arguments: Mapping[str, Any]) -> str:
+    """The action named in the reviewer's terms, or the bare tool name."""
+    display = getattr(tool, "approval_display", None)
+    if display is None:
+        return tool_name
+    try:
+        return _one_line(display.headline(arguments)) or tool_name
+    except Exception:  # pragma: no cover - defensive: never block a write on rendering
+        logger.warning("approval headline rendering failed tool=%s", tool_name, exc_info=True)
+        return tool_name
+
+
+def tool_details(tool: Any, tool_name: str, arguments: Mapping[str, Any]) -> str:
+    """The tool's own description of the change, or the generic argument summary."""
+    display = getattr(tool, "approval_display", None)
+    if display is None:
+        return arguments_preview(arguments)
+    try:
+        return _clamp(display.details(arguments))
+    except Exception:  # pragma: no cover - defensive: never block a write on rendering
+        logger.warning("approval preview rendering failed tool=%s", tool_name, exc_info=True)
+        return arguments_preview(arguments)
 
 
 def approval_tool_hooks(prompter: ApprovalPrompter) -> ToolExecutionHooks:
@@ -164,10 +189,12 @@ def approval_tool_hooks(prompter: ApprovalPrompter) -> ToolExecutionHooks:
         tool = request.tool
         if not bool(getattr(tool, "requires_approval", False)):
             return None
+        tool_name = request.tool_call.name
         approved, decided_by = prompter.request(
-            tool_name=request.tool_call.name,
+            call_id=request.tool_call.id,
+            headline=tool_headline(tool, tool_name, request.arguments),
             reason=str(getattr(tool, "approval_reason", "") or ""),
-            arguments=request.arguments,
+            details=tool_details(tool, tool_name, request.arguments),
             expiry_seconds=float(getattr(tool, "approval_expiry_seconds", 300)),
         )
         if approved:
@@ -289,6 +316,19 @@ def arguments_preview(arguments: Mapping[str, Any]) -> str:
     return "\n".join(kept)
 
 
+def _clamp(text: str) -> str:
+    """Hold any preview inside the transport budget, on a line boundary.
+
+    A tool renders its own prompt, so the length guarantee has to be enforced
+    here — a verbose renderer must not be able to overflow a Slack section or
+    have Discord silently drop the buttons off the end of the message.
+    """
+    if len(text) <= ARGS_PREVIEW_LIMIT:
+        return text
+    kept = text[:ARGS_PREVIEW_LIMIT].rsplit("\n", 1)[0]
+    return f"{kept}\n… {len(text) - len(kept)} more character(s) not shown"
+
+
 __all__ = [
     "APPROVE_ACTION_ID",
     "ARGS_PREVIEW_LIMIT",
@@ -298,4 +338,6 @@ __all__ = [
     "ApprovalPrompter",
     "approval_tool_hooks",
     "arguments_preview",
+    "tool_details",
+    "tool_headline",
 ]
