@@ -305,6 +305,58 @@ def _github_star_history_case() -> ToolFailureCase:
     )
 
 
+def _gcp_logging_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_logging_query_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("logging")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_logging_query_tool import gcp_logging_query
+
+        return gcp_logging_query(default_project="p", available_projects=["p"])
+
+    return ToolFailureCase(
+        "gcp_logging_query",
+        patch,
+        invoke,
+        "gcp_logging_query",
+        "gcp",
+    )
+
+
+def _raising_monitoring_service() -> Any:
+    """A monitoring client whose ``timeSeries.list`` execution fails."""
+    service = MagicMock()
+    service.projects().timeSeries().list().execute.side_effect = RuntimeError("monitoring")
+    # The aligner pre-flight reads a descriptor; leave it failing too so the
+    # tool falls back to its default aligner rather than a MagicMock.
+    service.projects().metricDescriptors().get().execute.side_effect = RuntimeError("descriptor")
+    return service
+
+
+def _gcp_monitoring_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        import integrations.gcp.tools.gcp_monitoring_query_tool as mod
+
+        mp.setattr(mod, "build_service", MagicMock(return_value=_raising_monitoring_service()))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.gcp.tools.gcp_monitoring_query_tool import gcp_monitoring_query
+
+        return gcp_monitoring_query(
+            filter='metric.type="a/b/c"', default_project="p", available_projects=["p"]
+        )
+
+    return ToolFailureCase(
+        "gcp_monitoring_query",
+        patch,
+        invoke,
+        "gcp_monitoring_query",
+        "gcp",
+    )
+
+
 def _eks_list_clusters_case() -> ToolFailureCase:
     def patch(mp: pytest.MonkeyPatch) -> None:
         import integrations.eks.tools as mod
@@ -786,6 +838,8 @@ _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _google_docs_case(),
     _github_repository_case(),
     _github_star_history_case(),
+    _gcp_logging_case(),
+    _gcp_monitoring_case(),
     _eks_list_clusters_case(),
     _eks_describe_cluster_case(),
     _eks_nodegroup_case(),
@@ -848,6 +902,37 @@ def test_tool_reports_exactly_one_sentry_event(
     registered = get_registered_tool_map().get(case.expected_tool_name)
     if registered is not None:
         assert registered.source == case.expected_source
+
+
+def test_gcp_list_projects_reports_a_partial_failure_at_warning_severity(
+    captured_sentry_events: list[CapturedSentryEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed live listing must be reported, but must not fail the tool.
+
+    ``resourcemanager.projects.list`` is a permission many service accounts
+    legitimately lack. The configured project scope is still a correct answer,
+    so the tool degrades: it reports at ``warning`` and returns the configured
+    list rather than an unavailable envelope.
+    """
+    import integrations.gcp.tools.gcp_list_projects_tool as mod
+
+    monkeypatch.setattr(mod, "build_service", MagicMock(side_effect=RuntimeError("discovery")))
+
+    result = mod.gcp_list_projects(
+        default_project="p",
+        available_projects=["p", "q"],
+        project_configs={"p": {"project_id": "p"}, "q": {"project_id": "p"}},
+    )
+
+    assert result["projects"] == ["p", "q"]
+    assert "discovery_error" in result
+
+    assert len(captured_sentry_events) == 1
+    event = captured_sentry_events[0]
+    assert isinstance(event.exc, RuntimeError)
+    assert event.extras["tag.tool_name"] == "gcp_list_projects"
+    assert event.extras["tag.source"] == "gcp"
 
 
 def test_eks_client_error_path_uses_warning_severity(
@@ -979,6 +1064,11 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "create_google_docs_incident_report",
         "get_github_repository",
         "get_github_star_history",
+        # GCP — each catches the Google API error and returns a structured dict
+        # so a 403 on one project does not abort the investigation.
+        "gcp_logging_query",
+        "gcp_monitoring_query",
+        "gcp_list_projects",
         # EKS — enumerated in #1463
         "list_eks_clusters",
         "describe_eks_cluster",
@@ -1352,10 +1442,21 @@ def test_every_migrated_tool_has_a_parameterised_failure_case() -> None:
     ``_normalize_named_bridge_call`` with ``get_openclaw_conversation``,
     and the latter's case already exercises that helper's
     ``report_run_error`` path.
+
+    ``gcp_list_projects`` has its own test below rather than a parameterised
+    case: its failure is partial by design (the live discovery call fails, the
+    configured answer still returns), so it never produces the ``available=
+    False`` / ``error`` shape the shared assertion looks for.
     """
     covered_by_parametrised = {case.expected_tool_name for case in _TOOL_FAILURE_CASES}
     shared_code_path = {"send_openclaw_message"}
-    missing = _MIGRATED_TOOL_NAMES - covered_by_parametrised - shared_code_path
+    covered_by_dedicated_test = {"gcp_list_projects"}
+    missing = (
+        _MIGRATED_TOOL_NAMES
+        - covered_by_parametrised
+        - shared_code_path
+        - covered_by_dedicated_test
+    )
     assert missing == set(), (
         "Every name in _MIGRATED_TOOL_NAMES must have a parameterised "
         "failure case in _TOOL_FAILURE_CASES (unless it shares a code path "

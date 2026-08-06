@@ -166,6 +166,7 @@
               "bitbucket",
               "elb",
               "ec2",
+              "gcp",
               "github",
               "github-workflow-tools",
               "github-security-fix",

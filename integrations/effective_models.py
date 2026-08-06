@@ -67,6 +67,7 @@ class EffectiveIntegrations(StrictConfigModel):
     mysql: EffectiveIntegrationEntry | None = None
     snowflake: EffectiveIntegrationEntry | None = None
     azure: EffectiveIntegrationEntry | None = None
+    gcp: EffectiveIntegrationEntry | None = None
     openobserve: EffectiveIntegrationEntry | None = None
     opensearch: EffectiveIntegrationEntry | None = None
     alertmanager: EffectiveIntegrationEntry | None = None

@@ -1135,6 +1135,74 @@ class AzureIntegrationConfig(StrictConfigModel):
         return max(1, min(v, 500))
 
 
+class GCPIntegrationConfig(StrictConfigModel):
+    """Normalized Google Cloud credentials and project scope.
+
+    Two independent axes of "multiple projects" exist and both are represented
+    here. ``project_id`` plus :attr:`additional_projects` covers the common GCP
+    case where one credential reaches many projects through folder/org-level
+    IAM inheritance — Cloud Logging can query all of them in a single request.
+    Genuinely separate credentials (a different org, a different SA) are
+    separate *instances* instead, via ``GCP_INSTANCES``.
+
+    Authentication resolves in precedence order: explicit
+    :attr:`service_account_key`, then :attr:`impersonate_service_account`
+    layered over the ambient credential, then plain ADC. On GKE with Workload
+    Identity the last one needs no configuration at all.
+    """
+
+    project_id: str
+    additional_projects: list[str] = Field(default_factory=list)
+    service_account_key: str = ""
+    impersonate_service_account: str = ""
+    max_results: int = 100
+    integration_id: str = ""
+
+    _normalize_strs = field_validator(
+        "project_id",
+        "service_account_key",
+        "impersonate_service_account",
+        "integration_id",
+        mode="before",
+    )(normalize_str())
+
+    @field_validator("additional_projects", mode="before")
+    @classmethod
+    def _split_projects(cls, value: object) -> list[str]:
+        """Accept a comma-separated env string or an already-parsed list.
+
+        Duplicates and the primary project are not filtered here — the model
+        does not know the primary yet during field validation. ``all_projects``
+        on the resolved config is the deduplicating accessor.
+        """
+        if value is None or value == "":
+            return []
+        items = value.split(",") if isinstance(value, str) else value
+        if not isinstance(items, (list, tuple)):
+            return []
+        return [text for text in (str(item).strip() for item in items) if text]
+
+    @field_validator("max_results", mode="before")
+    @classmethod
+    def _clamp_max_results(cls, value: object) -> int:
+        try:
+            v: int = int(value)  # type: ignore[arg-type,call-overload]
+        except (TypeError, ValueError):
+            return 100
+        return max(1, min(v, 1000))
+
+    @property
+    def all_projects(self) -> list[str]:
+        """Primary project first, then extras, de-duplicated and order-stable."""
+        seen: set[str] = set()
+        unique: list[str] = []
+        for project in (self.project_id, *self.additional_projects):
+            if project and project not in seen:
+                seen.add(project)
+                unique.append(project)
+        return unique
+
+
 class OpenObserveIntegrationConfig(StrictConfigModel):
     """Normalized OpenObserve credentials used by resolution and tool flows."""
 

@@ -49,6 +49,15 @@ from config.constants.datadog import (
     DATADOG_APP_KEY_ENV,
     DATADOG_SITE_ENV,
 )
+from config.constants.gcp import (
+    GCP_ADDITIONAL_PROJECTS_ENV,
+    GCP_IMPERSONATE_SERVICE_ACCOUNT_ENV,
+    GCP_INSTANCES_ENV,
+    GCP_MAX_RESULTS_ENV,
+    GCP_PROJECT_ID_ENV,
+    GCP_SERVICE_ACCOUNT_KEY_ENV,
+    GOOGLE_CLOUD_PROJECT_ENV,
+)
 from config.constants.github import (
     GITHUB_MCP_ARGS_ENV,
     GITHUB_MCP_AUTH_TOKEN_ENV,
@@ -189,6 +198,7 @@ from integrations.config_models import (
     CoralogixIntegrationConfig,
     DatadogIntegrationConfig,
     DiscordBotConfig,
+    GCPIntegrationConfig,
     GrafanaIntegrationConfig,
     GroundcoverIntegrationConfig,
     HelmIntegrationConfig,
@@ -214,6 +224,7 @@ from integrations.dagster import classify as _classify_dagster
 from integrations.datadog import classify as _classify_datadog
 from integrations.discord import classify as _classify_discord
 from integrations.effective_models import EffectiveIntegrations
+from integrations.gcp import classify as _classify_gcp
 from integrations.github.mcp import build_github_mcp_config
 from integrations.github.mcp import classify as _classify_github
 from integrations.gitlab import DEFAULT_GITLAB_BASE_URL, build_gitlab_config
@@ -453,6 +464,7 @@ _CLASSIFIERS: dict[str, _ClassifyFn] = {
     "bitbucket": _classify_bitbucket,
     "snowflake": _classify_snowflake,
     "azure": _classify_azure,
+    "gcp": _classify_gcp,
     "openobserve": _classify_openobserve,
     "opensearch": _classify_opensearch,
     "splunk": _classify_splunk,
@@ -785,6 +797,37 @@ def load_env_integrations() -> list[dict[str, Any]]:
                         },
                     )
                 )
+
+    gcp_multi = _parse_instances_env(GCP_INSTANCES_ENV, "gcp")
+    if gcp_multi is not None:
+        integrations.append(gcp_multi)
+        gcp_project_id = ""
+    else:
+        # GOOGLE_CLOUD_PROJECT is Google's own convention; a pod that already
+        # sets it for the client libraries needs no OpenSRE-specific variable.
+        gcp_project_id = (
+            os.getenv(GCP_PROJECT_ID_ENV, "").strip()
+            or os.getenv(GOOGLE_CLOUD_PROJECT_ENV, "").strip()
+        )
+    if gcp_project_id:
+        try:
+            gcp_config = GCPIntegrationConfig.model_validate(
+                {
+                    "project_id": gcp_project_id,
+                    "additional_projects": os.getenv(GCP_ADDITIONAL_PROJECTS_ENV, ""),
+                    "service_account_key": resolve_env_credential(GCP_SERVICE_ACCOUNT_KEY_ENV),
+                    "impersonate_service_account": os.getenv(
+                        GCP_IMPERSONATE_SERVICE_ACCOUNT_ENV, ""
+                    ).strip(),
+                    "max_results": os.getenv(GCP_MAX_RESULTS_ENV, "100").strip() or "100",
+                }
+            )
+        except Exception as exc:
+            _report_env_loader_failure(exc, integration="gcp")
+        else:
+            integrations.append(
+                _active_env_record("gcp", gcp_config.model_dump(exclude={"integration_id"}))
+            )
 
     github_mode = os.getenv(GITHUB_MCP_MODE_ENV, "streamable-http").strip() or "streamable-http"
     github_url = os.getenv(GITHUB_MCP_URL_ENV, "").strip()
