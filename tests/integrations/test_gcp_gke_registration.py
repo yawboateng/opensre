@@ -24,7 +24,7 @@ _ONE_CREDENTIAL = {"project_id": "acme"}
 _OTHER_CREDENTIAL = {"project_id": "research", "impersonate_service_account": "ro@x"}
 
 
-def _resolved(*, key: str = "") -> dict[str, Any]:
+def _resolved(*, key: str = "", impersonate: str = "") -> dict[str, Any]:
     """A classified-integrations dict with one GCP credential over two projects."""
     config: dict[str, Any] = {
         "project_id": "acme",
@@ -32,6 +32,8 @@ def _resolved(*, key: str = "") -> dict[str, Any]:
     }
     if key:
         config["service_account_key"] = key
+    if impersonate:
+        config["impersonate_service_account"] = impersonate
     return {"gcp": config}
 
 
@@ -134,6 +136,43 @@ def test_kubeconfig_omits_the_env_block_when_there_is_no_key_file() -> None:
     )
 
     assert "env" not in document["users"][0]["user"]["exec"]
+
+
+def test_the_plugin_is_told_to_resolve_adc_itself() -> None:
+    """Without the flag the plugin shells out to ``gcloud``.
+
+    In the container image gcloud is not installed, so the plugin exits
+    non-zero, the Kubernetes client sends no bearer token, and the API server
+    answers ``pods is forbidden: User "system:anonymous"`` — a 403 that reads
+    like a missing RBAC binding rather than a missing credential.
+    """
+    document = yaml.safe_load(
+        build_kubeconfig(context="c", endpoint="10.0.0.1", ca_certificate=_CA)
+    )
+
+    assert document["users"][0]["user"]["exec"]["args"] == ["--use_application_default_credentials"]
+
+
+def test_impersonation_is_forwarded_to_the_plugin() -> None:
+    """The plugin must present the account the GCP API clients present.
+
+    ``resolve_credentials`` layers impersonation over the ambient credential, so
+    a kubeconfig built without it authenticates as the *node's* identity while
+    discovery ran as the impersonated one.
+    """
+    document = yaml.safe_load(
+        build_kubeconfig(
+            context="c",
+            endpoint="10.0.0.1",
+            ca_certificate=_CA,
+            impersonate_service_account="sre@acme.iam.gserviceaccount.com",
+        )
+    )
+
+    assert document["users"][0]["user"]["exec"]["args"] == [
+        "--use_application_default_credentials",
+        "--impersonate_service_account=sre@acme.iam.gserviceaccount.com",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -406,6 +445,27 @@ def test_the_stored_kubeconfig_pins_the_key_file_opensre_discovered_with(
     exec_block = yaml.safe_load(store.calls[0]["kubeconfig"])["users"][0]["user"]["exec"]
     assert exec_block["env"] == [
         {"name": "GOOGLE_APPLICATION_CREDENTIALS", "value": "/keys/sa.json"}
+    ]
+
+
+def test_the_stored_kubeconfig_carries_the_impersonation_discovery_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery and connection must present one identity.
+
+    ``resolve_credentials`` impersonates for the API clients, so a kubeconfig
+    that omits the flag authenticates as the ambient credential — which may be
+    able to *list* the cluster while having no RBAC inside it.
+    """
+    store = _RecordingStore()
+    _install_registration(monkeypatch, store, [_cluster()])
+
+    register_gke_clusters(resolved=_resolved(impersonate="sre@acme.iam.gserviceaccount.com"))
+
+    exec_block = yaml.safe_load(store.calls[0]["kubeconfig"])["users"][0]["user"]["exec"]
+    assert exec_block["args"] == [
+        "--use_application_default_credentials",
+        "--impersonate_service_account=sre@acme.iam.gserviceaccount.com",
     ]
 
 

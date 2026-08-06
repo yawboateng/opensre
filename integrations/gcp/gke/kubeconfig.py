@@ -8,13 +8,21 @@ reason auto-registration is safe to do unattended: nothing durable is written
 that would be worth stealing.
 
 The identity the plugin presents is *not* automatically the identity OpenSRE
-used to discover the cluster. The plugin resolves Application Default
-Credentials on its own, so on a workstation it is whoever ran ``gcloud auth
-login``. When the GCP integration is configured with a service-account key
-*file*, :func:`build_kubeconfig` pins the plugin to that same file via
-``GOOGLE_APPLICATION_CREDENTIALS`` in the exec ``env`` block, so discovery and
-connection agree. An inline JSON key cannot be pinned this way — see
-:func:`credentials_path_for`.
+used to discover the cluster. Left to its own devices the plugin shells out to
+``gcloud config config-helper``, so it is whoever ran ``gcloud auth login`` —
+and where gcloud is absent, as in the container image, it is nobody: the plugin
+exits non-zero, the Kubernetes client falls back to an unauthenticated request,
+and the API server answers ``system:anonymous ... Forbidden``.
+
+:func:`build_kubeconfig` therefore always passes
+``--use_application_default_credentials``, which is the same credential chain
+``integrations.gcp.client.resolve_credentials`` uses, and mirrors the rest of
+that chain into the exec block: a service-account key *file* is pinned via
+``GOOGLE_APPLICATION_CREDENTIALS``, and impersonation is forwarded as
+``--impersonate_service_account``. Discovery and connection then present one
+identity. This adds no new requirement — the GCP tools already resolve ADC, so
+a setup without it cannot discover a cluster to register in the first place. An
+inline JSON key cannot be pinned this way — see :func:`credentials_path_for`.
 """
 
 from __future__ import annotations
@@ -41,6 +49,15 @@ _INSTALL_HINT = (
 #: Environment variable the plugin reads to locate a service-account key.
 _ADC_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
 
+#: Makes the plugin resolve Application Default Credentials itself. Without it
+#: the plugin shells out to ``gcloud``, which is not installed in the container
+#: image and is the wrong identity on a workstation.
+_ADC_FLAG = "--use_application_default_credentials"
+
+#: Layers impersonation on the ambient credential, as ``resolve_credentials``
+#: does for the API clients.
+_IMPERSONATE_FLAG = "--impersonate_service_account"
+
 
 def plugin_installed() -> bool:
     """Return whether :data:`AUTH_PLUGIN` is on ``PATH``."""
@@ -65,6 +82,7 @@ def build_kubeconfig(
     endpoint: str,
     ca_certificate: str,
     credentials_path: str = "",
+    impersonate_service_account: str = "",
 ) -> str:
     """Render a single-cluster kubeconfig as YAML.
 
@@ -74,10 +92,20 @@ def build_kubeconfig(
     either. ``ca_certificate`` is passed through as-is: ``container/v1`` already
     returns it base64-encoded, which is exactly what
     ``certificate-authority-data`` expects.
+
+    ``credentials_path`` and ``impersonate_service_account`` carry the GCP
+    integration's own credential settings into the exec block so the plugin
+    authenticates as the identity that discovered the cluster; see the module
+    docstring.
     """
+    args = [_ADC_FLAG]
+    if impersonate_service_account:
+        args.append(f"{_IMPERSONATE_FLAG}={impersonate_service_account}")
+
     exec_block: dict[str, Any] = {
         "apiVersion": _EXEC_API_VERSION,
         "command": AUTH_PLUGIN,
+        "args": args,
         "installHint": _INSTALL_HINT,
         "provideClusterInfo": True,
     }
