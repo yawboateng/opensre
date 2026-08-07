@@ -73,6 +73,49 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{/* Name of the web Service the ingress objects route to. */}}
+{{- define "opensre.webServiceName" -}}
+{{- printf "%s-web" (include "opensre.fullname" .) -}}
+{{- end -}}
+
+{{/* Validated ingress.kind, lowercased. Empty values mean `none`. */}}
+{{- define "opensre.ingressKind" -}}
+{{- $kind := default "none" .Values.ingress.kind | lower -}}
+{{- $known := list "none" "ingress" "istio" "gateway-api" -}}
+{{- if not (has $kind $known) -}}
+{{- fail (printf "ingress.kind must be one of %s, got %q" (join "|" $known) $kind) -}}
+{{- end -}}
+{{- $kind -}}
+{{- end -}}
+
+{{/*
+Preconditions shared by all three ingress renderers. Renders nothing; called
+for its `fail`s. Each check guards a configuration that installs cleanly and
+is then broken (or unsafe) at runtime, which is the expensive way to find out.
+*/}}
+{{- define "opensre.validateIngress" -}}
+{{- if not .Values.web.enabled -}}
+{{- fail "ingress.kind is set but web.enabled is false — there is no Service to route to." -}}
+{{- end -}}
+{{- if not .Values.ingress.host -}}
+{{- fail "ingress.host is required when ingress.kind is not `none`." -}}
+{{- end -}}
+{{- if not .Values.ingress.paths -}}
+{{- fail "ingress.paths must list at least one path prefix (e.g. /alerts)." -}}
+{{- end -}}
+{{/*
+Without OPENSRE_ALERT_LISTENER_TOKEN the alert routes answer every
+non-loopback caller with 403, so an ingress would publish an endpoint that
+cannot work. Only checkable when this chart renders the Secret — with
+`existingSecret` the contents are out-of-band, so NOTES.txt warns instead.
+*/}}
+{{- if and .Values.secret.create (not .Values.secret.existingSecret) -}}
+{{- if not (get .Values.secret.data "OPENSRE_ALERT_LISTENER_TOKEN") -}}
+{{- fail "ingress.kind is set but secret.data.OPENSRE_ALERT_LISTENER_TOKEN is empty — /alerts and /investigate would reject every caller through the ingress with 403. Set the token, or use secret.existingSecret to supply it out-of-band." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Shared env for both workloads. `mode` is passed by the caller via a dict:
 {{ include "opensre.env" (dict "root" . "mode" "web") }}

@@ -9,6 +9,28 @@ web (HTTP API):
   Endpoints: GET /health  POST /alerts  POST /investigate
 {{- end }}
 
+{{- $ingressKind := include "opensre.ingressKind" . }}
+{{- if ne $ingressKind "none" }}
+
+inbound routing ({{ $ingressKind }}):
+  Host  : {{ .Values.ingress.host }}
+  Paths : {{ join " " .Values.ingress.paths }}
+  Test  : curl -X POST https://{{ .Values.ingress.host }}{{ first .Values.ingress.paths }} \
+            -H "Authorization: Bearer $OPENSRE_ALERT_LISTENER_TOKEN" \
+            -H "Content-Type: application/json" -d '{"alert_name":"ping"}'
+
+  Only the paths above are routed. /health, /healthz, /readyz and /ok are NOT
+  token-gated — do not add "/" to ingress.paths.
+{{- if .Values.secret.existingSecret }}
+
+  This release references Secret "{{ .Values.secret.existingSecret }}", so the
+  chart cannot confirm OPENSRE_ALERT_LISTENER_TOKEN is set. Without it every
+  request through the ingress is answered 403. Check with:
+    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secret.existingSecret }} \
+      -o jsonpath='{.data.OPENSRE_ALERT_LISTENER_TOKEN}' | wc -c
+{{- end }}
+{{- end }}
+
 {{- if .Values.gateway.enabled }}
 
 gateway (Slack/Telegram + scheduler):

@@ -50,6 +50,11 @@ secret:
     # KUBECONFIG_CONTENT: ""          # inline kubeconfig for the target cluster(s)
     # DATADOG_API_KEY: ""             # any integration credentials
     # DATABASE_URI / REDIS_URI may also be placed here instead of the blocks below.
+    # Bearer token for POST /alerts and POST /investigate. Unset, those routes
+    # serve loopback callers only and answer every other caller with 403 — so an
+    # ingress without this token exposes an endpoint that cannot work. Required
+    # (and enforced at render time) whenever `ingress.kind` is not `none`.
+    # OPENSRE_ALERT_LISTENER_TOKEN: ""
 
 # ---------------------------------------------------------------------------
 # Persistence — supports BOTH external managed URIs and bundled in-chart pods.
@@ -115,9 +120,6 @@ web:
     type: ClusterIP
     port: 8000
     annotations: {}
-  # Alert-intake / investigate routes are gated by this bearer token (env
-  # OPENSRE_ALERT_LISTENER_TOKEN). Put the value in the Secret; set this to the
-  # key name it lives under to reference it, or leave blank to disable auth.
   autoscaling:
     enabled: false
     minReplicas: 1
@@ -127,6 +129,73 @@ web:
   probes:
     enabled: true
   extraEnv: {}
+
+# ---------------------------------------------------------------------------
+# Inbound routing to the web Service, for webhook senders outside the cluster
+# (PagerDuty, Rootly, Alertmanager, Grafana). Off by default — nothing in
+# OpenSRE needs inbound HTTP unless you push alerts to it.
+#
+# Pick ONE renderer with `kind`; the other two render nothing:
+#   none         no inbound routing (default)
+#   ingress      networking.k8s.io/v1 Ingress
+#   istio        networking.istio.io/v1 VirtualService (+ optional Gateway)
+#   gateway-api  gateway.networking.k8s.io/v1 HTTPRoute
+#
+# `istio` and `gateway-api` need their CRDs present in the cluster; `helm
+# template` renders either regardless, but `helm install` fails without them.
+# ---------------------------------------------------------------------------
+ingress:
+  kind: none
+  # External hostname. Required whenever kind is not `none`.
+  host: ""
+
+  # Path prefixes routed to the web Service — an allowlist, not a filter you
+  # can skip. The web app also serves /health, /healthz, /readyz and /ok, and
+  # NONE of those are token-gated: routing "/" publishes cluster health to
+  # anyone who can reach the hostname. Add "/investigate" only deliberately —
+  # it runs a full LLM investigation synchronously, so each request costs real
+  # money and holds a worker for its duration.
+  paths:
+    - /alerts
+
+  # Applied to whichever object `kind` renders.
+  annotations: {}
+
+  # kind: ingress only.
+  className: ""
+  # [{secretName: opensre-tls, hosts: [opensre.example.com]}]
+  tls: []
+
+  # kind: istio only.
+  istio:
+    # Attach to Gateways that already exist, as "namespace/name". Preferred on
+    # a shared cluster: the platform team's Gateway already terminates TLS for
+    # its wildcard host, so OpenSRE only needs a route.
+    gateways:
+      - istio-system/default
+    # Render a dedicated Gateway instead. `gateways` is ignored when this is on.
+    gateway:
+      create: false
+      # Label selector matching the ingress gateway Deployment's pods. Istio's
+      # own default install uses `istio: ingressgateway`; platform-managed
+      # installs often rename it, so check before assuming.
+      selector:
+        istio: ingressgateway
+      # Leave credentialName empty for plaintext :80 (only sane behind another
+      # TLS terminator). Set it to a Secret in the GATEWAY's namespace, not
+      # this release's — Istio reads it from where the gateway pods run.
+      tls:
+        credentialName: ""
+        mode: SIMPLE
+
+  # kind: gateway-api only. Gateways this route attaches to; the referenced
+  # Gateway must allow routes from this namespace.
+  gatewayApi:
+    parentRefs:
+      - name: default
+        namespace: istio-ingress
+        # Pin one listener (e.g. "https") when the Gateway has several.
+        sectionName: ""
 
 # ---------------------------------------------------------------------------
 # gateway workload — Slack/Telegram + scheduler. Fixed to ONE replica: Slack
