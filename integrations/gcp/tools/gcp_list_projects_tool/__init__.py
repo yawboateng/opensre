@@ -42,6 +42,7 @@ _REPEAT_ANTI_EXAMPLE = (
         "Checking whether a service's project is in scope before investigating it",
     ],
     anti_examples=[_REPEAT_ANTI_EXAMPLE],
+    surfaces=("investigation", "action"),
     requires=[],
     input_schema={"type": "object", "properties": {}, "required": []},
     is_available=gcp_available,

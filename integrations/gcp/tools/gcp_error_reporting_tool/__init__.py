@@ -130,6 +130,7 @@ def _fetch(
         "Checking how many users an error affects, not just how often it fires",
     ],
     anti_examples=list(_ANTI_EXAMPLES),
+    surfaces=("investigation", "action"),
     requires=[],
     input_schema={
         "type": "object",

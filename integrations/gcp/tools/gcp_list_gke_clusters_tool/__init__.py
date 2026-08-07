@@ -90,6 +90,7 @@ def _list_clusters(service: Any, project: str) -> tuple[list[dict[str, Any]], li
         "Spotting a node pool that is unhealthy or has hit its autoscaling ceiling",
     ],
     anti_examples=list(_ANTI_EXAMPLES),
+    surfaces=("investigation", "action"),
     requires=[],
     input_schema={
         "type": "object",

@@ -48,26 +48,26 @@ A successful verification lists the namespaces visible to the configured credent
 
 ## Available tools
 
-| Tool | What it does |
-|---|---|
-| `kubernetes_list_pods` | List pods in a namespace with phase, readiness, and restart counts |
-| `kubernetes_get_pod_logs` | Fetch recent log lines from a pod container |
-| `kubernetes_list_deployments` | List deployments with desired/ready/available replica counts |
-| `kubernetes_get_events` | List cluster events — crash loops, OOM kills, scheduling failures |
-| `kubernetes_describe_pod` | Fetch full spec, status, and container states for a single pod |
-| `kubernetes_list_nodes` | List cluster nodes with conditions, capacity, and allocatable resources |
-| `kubernetes_list_services` | List services with their type, clusterIP, ports, and selector |
-| `kubernetes_list_statefulsets` | List StatefulSets with desired/ready/current/updated replica counts |
-| `kubernetes_list_daemonsets` | List DaemonSets with desired/current/ready/available counts |
-| `kubernetes_list_ingresses` | List Ingress resources with routing rules, host→service path mappings, and TLS config |
-| `kubernetes_list_configmaps` | List ConfigMaps with their key-value data |
-| `kubernetes_get_resource` | Fetch a single named resource by type and name (pods, deployments, statefulsets, daemonsets, services, ingresses, configmaps, replicasets, pvcs, nodes) |
-| `kubernetes_list_clusters` | List the registered clusters you can target by name (for multi-cluster setups) |
+| Tool | What it does | Chat |
+|---|---|---|
+| `kubernetes_list_pods` | List pods in a namespace with phase, readiness, and restart counts | ✓ |
+| `kubernetes_get_pod_logs` | Fetch recent log lines from a pod container | ✓ |
+| `kubernetes_list_deployments` | List deployments with desired/ready/available replica counts | ✓ |
+| `kubernetes_get_events` | List cluster events — crash loops, OOM kills, scheduling failures | ✓ |
+| `kubernetes_describe_pod` | Fetch full spec, status, and container states for a single pod | ✓ |
+| `kubernetes_list_nodes` | List cluster nodes with conditions, capacity, and allocatable resources | ✓ |
+| `kubernetes_list_services` | List services with their type, clusterIP, ports, and selector | ✓ |
+| `kubernetes_list_statefulsets` | List StatefulSets with desired/ready/current/updated replica counts |  |
+| `kubernetes_list_daemonsets` | List DaemonSets with desired/current/ready/available counts |  |
+| `kubernetes_list_ingresses` | List Ingress resources with routing rules, host→service path mappings, and TLS config |  |
+| `kubernetes_list_configmaps` | List ConfigMaps with their key-value data |  |
+| `kubernetes_get_resource` | Fetch a single named resource by type and name (pods, deployments, statefulsets, daemonsets, services, ingresses, configmaps, replicasets, pvcs, nodes) |  |
+| `kubernetes_list_clusters` | List the registered clusters you can target by name (for multi-cluster setups) | ✓ |
 
 ## Targeting multiple clusters
 
 You can register more than one cluster — for example a separate GKE cluster per
-GCP project (`gke-dev`, `gke-prod`) — and let an investigation move between them.
+GCP project (`gke-dev`, `gke-prod`) — and let an investigation or chat turn move between them.
 Each cluster is one named entry with its own kubeconfig context.
 
 Add clusters with the CLI. The connection is verified before it is saved:
@@ -184,7 +184,7 @@ static IP. Reserve one before you allow-list it.
 `kubernetes_list_clusters` only knows about clusters someone registered here.
 `gcp_list_gke_clusters` asks GCP instead and lists every cluster in your
 projects, saying for each one whether a kubeconfig is registered
-(`registered_as`) or not. That is how an investigation notices a cluster nobody
+(`registered_as`) or not. That is how an investigation or chat turn notices a cluster nobody
 added — and the name it reports is the one to pass as `cluster` once you
 register it.
 
