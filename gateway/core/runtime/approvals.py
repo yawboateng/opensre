@@ -9,7 +9,8 @@ This module holds the parts that do not depend on a chat transport: the broker
 that connects a click to the waiting tool call, the button identifiers, and the
 harness hooks. Each transport supplies its own :class:`ApprovalPrompter` — Block
 Kit in ``gateway.transports.slack.approvals``, message components in
-``gateway.transports.discord.approvals``.
+``gateway.transports.discord.approvals``, and a text reply in
+``gateway.transports.buzz.approvals``, which has no buttons to offer.
 """
 
 from __future__ import annotations
@@ -364,16 +365,25 @@ def arguments_preview(arguments: Mapping[str, Any]) -> str:
     failed the one job this has — the interesting field is usually last, so a
     length cap ate exactly the part the reviewer needed to see.
 
-    Arguments here are model-supplied (credentials are injected downstream, in
+    Approval prompts land in multi-member channels (Buzz rooms, Slack
+    channels, Discord), so a bystander must not be able to read a credential
+    out of one — even though only the requester can approve. Arguments here
+    are model-supplied (credentials are injected downstream, in
     ``core.execution``), but a model may pass an explicit token override, so
-    secret-looking keys are still redacted before this reaches a channel.
+    redaction runs on three levels: by key name, then per rendered field, then
+    a pattern scrub of the finished text for a secret riding under a neutral
+    key.
     """
     if not arguments:
         return ""
+    # Key-name redaction first (api_key, token, password, …), then pattern
+    # scrub on the serialized form for secrets that ride under neutral keys.
+    from gateway.core.attachments.inline import scrub_secrets
+    from platform.observability.trace.redaction import redact_sensitive
+
+    safe = redact_sensitive(dict(arguments))
     try:
-        lines = [
-            line for key, value in arguments.items() for line in _argument_lines(str(key), value)
-        ]
+        lines = [line for key, value in safe.items() for line in _argument_lines(str(key), value)]
     except Exception:  # pragma: no cover - defensive: never block a write on rendering
         logger.warning("approval preview rendering failed", exc_info=True)
         return "(arguments could not be rendered; see server logs)"
@@ -386,7 +396,10 @@ def arguments_preview(arguments: Mapping[str, Any]) -> str:
             break
         kept.append(line)
         used += len(line) + 1
-    return "\n".join(kept)
+    # Scrub last, on the joined text: a secret under a neutral key survives
+    # both the key-name pass and the per-field pass. Re-clamp afterwards
+    # because a placeholder can be longer than what it replaced.
+    return _clamp(scrub_secrets("\n".join(kept)))
 
 
 def _clamp(text: str) -> str:

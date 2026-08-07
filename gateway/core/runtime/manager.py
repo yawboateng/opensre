@@ -1,15 +1,18 @@
 """Gateway process entrypoint and lifecycle owner.
 
 ``GatewayManager`` is the composition root for the OpenSRE background agent:
-it assembles the transport-agnostic turn handler from a booted session's tools
-and starts every daemon component — the web health app, the Telegram and Slack
-chat workers (when configured), and the scheduled-task runner — then owns the
-process lifecycle (signals, ``stop``/``wait``). Component states are published
-through :func:`gateway.core.runtime.daemon.write_component_status` so the CLI and the
-interactive shell can report status. It holds no transport or agent-dispatch
-logic itself — those live in :mod:`gateway.core.runtime.turn_handler`,
-:mod:`gateway.transports.telegram.wiring`, and :mod:`gateway.transports.slack.wiring`, and
-:mod:`gateway.transports.discord.wiring`.
+logging + credential hydrate, then
+:func:`bootstrap.process.configure_process` (``GATEWAY_PROFILE``), then
+assemble the turn handler and start daemon components — web, Telegram / Slack /
+Discord / Buzz (when configured), and the scheduled-task runner. Owns signals and
+``stop``/``wait``. Component states go through
+:func:`gateway.core.runtime.daemon.write_component_status`. Transport and turn
+dispatch live in :mod:`gateway.core.runtime.turn_handler` and the transport
+wiring packages
+(:mod:`gateway.transports.telegram.wiring`,
+:mod:`gateway.transports.slack.wiring`,
+:mod:`gateway.transports.discord.wiring`,
+:mod:`gateway.transports.buzz.wiring`) — not here.
 """
 
 from __future__ import annotations
@@ -40,6 +43,8 @@ from gateway.core.runtime.daemon import (
 from gateway.core.runtime.errors import GatewayConfigurationError
 from gateway.core.runtime.readiness import set_ready
 from gateway.core.runtime.turn_handler import GatewayTurnHandler
+from gateway.transports.buzz.background import BuzzGatewayBackground
+from gateway.transports.buzz.wiring import start_buzz_worker
 from gateway.transports.discord.background import DiscordGatewayBackground
 from gateway.transports.discord.wiring import start_discord_worker
 from gateway.transports.slack.socket_mode_worker import SlackGatewayBackground
@@ -67,6 +72,7 @@ class GatewayManager:
         self.telegram_background_worker: TelegramGatewayBackground | None = None
         self.slack_background_worker: SlackGatewayBackground | None = None
         self.discord_background_worker: DiscordGatewayBackground | None = None
+        self.buzz_background_worker: BuzzGatewayBackground | None = None
         self.web_server: Any = None
         self.scheduler: Any = None
         self._scheduler_reload_thread: threading.Thread | None = None
@@ -80,13 +86,13 @@ class GatewayManager:
         self._stopped = threading.Event()
 
     def start_gateway(self, *, wait: bool = True) -> GatewayManager:
-        """Assemble the turn handler, start all components, and own the lifecycle."""
-        from gateway.core.runtime import startup
+        """Credential hydrate, shared process boot, then start daemon components."""
+        from bootstrap.process import GATEWAY_PROFILE, configure_process
 
         logger = self.logger = configure_logging()
         set_ready(False)
         self._load_credentials(logger)
-        startup.run(logger)
+        configure_process(GATEWAY_PROFILE, logger=logger)
 
         # Compose the transport-agnostic turn handler. Action tools are resolved
         # per turn from each chat's live session inside the handler (not here).
@@ -104,6 +110,7 @@ class GatewayManager:
         self._start_telegram(logger, chat_handler)
         self._start_slack(logger, chat_handler)
         self._start_discord(logger, chat_handler)
+        self._start_buzz(logger, chat_handler)
         self._start_scheduler(logger)
         self._publish_status(logger)
         # Deploy health waits (EC2 Docker + AMI) match this line for Telegram
@@ -138,6 +145,8 @@ class GatewayManager:
             stopped = self.slack_background_worker.stop(timeout=timeout) and stopped
         if self.discord_background_worker is not None:
             stopped = self.discord_background_worker.stop(timeout=timeout) and stopped
+        if self.buzz_background_worker is not None:
+            stopped = self.buzz_background_worker.stop(timeout=timeout) and stopped
         clear_component_status()
         return stopped
 
@@ -221,14 +230,26 @@ class GatewayManager:
         self.discord_background_worker = worker
         self.components["discord"] = "connected via gateway"
 
+    def _start_buzz(self, logger: logging.Logger, handler: Any) -> None:
+        """Start the Buzz chat worker; run without it when not configured."""
+        try:
+            worker, _settings = start_buzz_worker(logger=logger, handler=handler)
+        except GatewayConfigurationError as exc:
+            logger.warning("Buzz chat disabled: %s", exc)
+            self.components["buzz"] = f"not configured ({exc})"
+            return
+        self.buzz_background_worker = worker
+        self.components["buzz"] = "polling for messages"
+
     def _start_scheduler(self, _logger: logging.Logger) -> None:
         """Run cron-scheduled tasks inside the daemon (no separate process needed)."""
-        from gateway.core.runtime.bootstrap import install_runtime
+        from bootstrap.adapters import install_scheduler_runners
         from platform.scheduler.reload_signal import consume_scheduler_reload_request
         from platform.scheduler.runner import start_background_scheduler
 
         # Investigation + multiplexed scheduled-agent runners (Sentry digest, etc.).
-        install_runtime(harness_adapters=False, scheduler_runners=True)
+        # Adapters already registered at process boot; runners attach with the scheduler.
+        install_scheduler_runners()
         from gateway.core.runtime.scheduler_concurrency import gate_registered_scheduler_runners
 
         gate_registered_scheduler_runners(self.turn_gate)

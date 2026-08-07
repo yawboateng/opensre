@@ -63,6 +63,35 @@
   - mypy exempts Protocol bodies from "missing return", so `pass` under a
     `-> list[str]` signature passes `make typecheck`.
 
+### Tests (high-signal, not exhaustive)
+
+Prefer a **small suite that pins real failure modes** over broad line coverage.
+One test per distinct bug class; do not multiply cases that exercise the same
+branch with different literals.
+
+**Write / keep tests for:**
+
+- Security and authorization (allowlists, request-scoped authority, cross-actor
+  or cross-channel isolation).
+- Correctness under concurrency, crash, or shutdown (cursors, in-flight work,
+  ack vs replay, drain vs approval wait).
+- Package / transport borders that prevent silent coupling (no peer imports,
+  session key shape unique to the surface).
+- Regressions that already bit review or production (the P1 that forced a fix).
+
+**Skip or thin (unless they are the *only* coverage of a contract):**
+
+- Happy-path “mock was called once” wrappers (client send, init posts status).
+- Pure string / vocabulary tables when approve/deny/leave-open paths already
+  cover the helper.
+- Redundant success variants of an ack or dispatch path already covered by
+  fail / cancel / on_handled cases.
+- Defensive parse / “empty on fetch failure” edges that do not move durable
+  state.
+- Stand-in tests that restate control-flow intent without exercising the real
+  loop or wiring (e.g. “`create_task` does not block the creator”).
+
+
 ### Docs under `docs/`
 
 **Keep docs in sync with every change — this is not optional.** Any change that
@@ -154,6 +183,7 @@ When opening a PR, fill out the [**PR template**](.github/PULL_REQUEST_TEMPLATE.
 
 | Path                                          | What it does                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap/`                                  | Composition root: shared process boot (`process.py` — env, Sentry, adapters, capability warnings, LLM preload as an ordered `BootStep` table) and the registration steps themselves (`adapters.py`). Every host picks a `ProcessProfile` instead of writing its own boot order. The one package allowed to import `tools` and `integrations` together. |
 | `core/`                                       | Investigation orchestration, context assembly, the shared runtime tool-calling loop, and domain logic (state, types, correlation rules). Includes `core/tool_framework/` — the `BaseTool` base class, `@tool` decorator, registered-tool primitives, error telemetry, skill-guidance helpers, and shared payload utilities (`utils/`). |
 | `surfaces/cli/`                               | Command-line interface, onboarding wizard, local LLM helpers, and CLI tests support. Provider onboarding → `wizard/<provider>.py` (or `wizard/local_llm/`); new subcommands → `commands/<name>.py`. Runtime LLM wiring → [`core/llm/AGENTS.md`](core/llm/AGENTS.md).                                                                                                                                                                                                                                                   |
 | `surfaces/interactive_shell/`                 | Interactive terminal (REPL) loop, slash commands, chat/help surfaces, action-planning harness, and terminal UI.                                                                                                                                                                                                                        |
@@ -290,6 +320,14 @@ Steps:
   when appending to an existing file: **use the import style the file already
   established** (an existing `import core.context_budget as budget` means new
   code calls `budget.name`, not `from core.context_budget import name`).
+- Unused global variable (CodeQL / code-quality "Unused global variable"):
+  CodeQL often **does not credit cross-module imports** as a use of a module-
+  level constant. A `FOO = "..."` in `text.py` that is only read via
+  `from …text import FOO` in another file can still alert. Prefer keeping
+  related copy in a structure that is clearly used in the defining module
+  (e.g. a dict entry under `HANDOFF_GUIDANCE["database_query:"]` with prefix
+  matching in the consumer), or co-locate the constant with its only reader.
+  Do **not** add a no-op self-reference or `# noqa` just to silence the alert.
 - Shared client state under concurrent turns: LLM clients are cached per role
   (`get_llm`) and the gateway runs turns in parallel, so **one client instance
   serves several in-flight requests**. An instance flag mutated inside an error
