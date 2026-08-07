@@ -1,17 +1,18 @@
 ---
 title: "Rootly"
-description: "Connect Rootly so OpenSRE can read incident context and record findings on the incident timeline"
+description: "Connect Rootly so OpenSRE can read incident context, look up who is on call, and record findings on the incident timeline"
 ---
 
-OpenSRE can read Rootly incidents during an investigation and — with your approval — append findings to an incident's timeline, so the RCA lands on the incident the retrospective will actually read.
+OpenSRE can read Rootly incidents during an investigation, look up who is currently on call, and — with your approval — append findings to an incident's timeline, so the RCA lands on the incident the retrospective will actually read.
 
-Both tools are available in chat as well as during an investigation, so you can ask about an incident from Slack, Discord, or Telegram.
+These tools are available in chat as well as during an investigation, so you can ask about an incident or check on-call coverage from Slack, Discord, or Telegram.
 
 ## Prerequisites
 
 - A Rootly account
 - A Rootly API key with read access to incidents and incident events
 - Write access on incident events if you want OpenSRE to post timeline notes
+- Optional: a key whose user can read on-call schedules and escalation policies, if you want who-is-on-call lookups
 
 ## Setup
 
@@ -54,6 +55,26 @@ Verification performs a minimal `GET /v1/incidents` request.
 `get` and `events` need an `incident_id` — Rootly's incident id or its slug. When an alert already names an incident, OpenSRE defaults to `get`.
 
 Listings are capped at 50 incidents and 100 timeline events per call. When Rootly holds more, the result sets `truncated`.
+
+## Who is on call
+
+`rootly_on_call` is read-only and takes an `action`:
+
+| Action | What it returns |
+| --- | --- |
+| `who_is_on_call` | Who is on call right now, with their escalation policy, level, schedule, and shift window. Narrow with `schedule_id` or `escalation_policy_id`; pass `since` and `until` for upcoming coverage |
+| `schedules` | On-call schedules with their Slack channel and user group |
+| `escalation_policies` | Escalation policies with repeat count and the services and teams they cover |
+
+<Note>
+OpenSRE returns a responder's name, team, and time zone. It never returns phone numbers or email addresses, so nothing this tool prints into a channel can be someone's mobile number.
+</Note>
+
+<Note>
+Rootly On-Call is a separate Rootly product. If your account or API key cannot see it, this tool says so and the incident tools keep working.
+</Note>
+
+Results are capped at 50 per call and set `truncated` when Rootly holds more.
 
 ## Posting to a timeline
 

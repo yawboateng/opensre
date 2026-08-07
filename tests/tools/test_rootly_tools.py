@@ -7,11 +7,12 @@ import pytest
 
 from integrations.rootly.tools.incidents import _extract_params as extract_incident_params
 from integrations.rootly.tools.incidents import rootly_incidents
+from integrations.rootly.tools.on_call import rootly_on_call
 from integrations.rootly.tools.timeline import rootly_post_timeline_event
 from integrations.rootly.tools.timeline_approval import TIMELINE_EVENT_APPROVAL_DISPLAY
 from tools.registry import get_registered_tools
 
-_ROOTLY_TOOLS = {"rootly_incidents", "rootly_post_timeline_event"}
+_ROOTLY_TOOLS = {"rootly_incidents", "rootly_on_call", "rootly_post_timeline_event"}
 
 
 def _client() -> MagicMock:
@@ -173,3 +174,37 @@ def test_receipt_is_empty_until_rootly_assigns_an_id() -> None:
     assert "ev-1" in TIMELINE_EVENT_APPROVAL_DISPLAY.receipt(
         arguments, {"event_id": "ev-1", "visibility": "internal"}
     )
+
+
+def test_on_call_entitlement_gap_leaves_the_incident_tools_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-tool isolation: on-call entitlement gap does not affect incidents."""
+
+    # Mock on-call tool to return entitlement gap
+    def mock_on_call_client(*_a: Any) -> MagicMock:
+        client = _client()
+        client.list_on_call.return_value = {
+            "success": False,
+            "entitled": False,
+            "error": "Rootly On-Call returned HTTP 403. Account lacks on-call permissions.",
+        }
+        return client
+
+    # Mock incidents tool to return success
+    def mock_incidents_client(*_a: Any) -> MagicMock:
+        client = _client()
+        client.list_incidents.return_value = {"success": True, "incidents": []}
+        return client
+
+    monkeypatch.setattr("integrations.rootly.tools.on_call.resolve_client", mock_on_call_client)
+    monkeypatch.setattr("integrations.rootly.tools.incidents.resolve_client", mock_incidents_client)
+
+    # On-call should be unavailable due to entitlement gap
+    on_call_result = rootly_on_call(rootly_token="secret")
+    assert on_call_result["available"] is False
+    assert on_call_result.get("entitled") is False
+
+    # But incidents should still work
+    incidents_result = rootly_incidents(rootly_token="secret")
+    assert incidents_result["available"] is True

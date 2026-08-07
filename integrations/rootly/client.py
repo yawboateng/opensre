@@ -1,4 +1,4 @@
-"""Rootly REST API client for incident context and timeline write-back.
+"""Rootly REST API client for both incident context and on-call lookup.
 
 Rootly speaks **JSON:API**: every request and response carries
 ``application/vnd.api+json``, and a resource arrives as
@@ -10,6 +10,9 @@ so no call site can forget it.
 Responses are flattened to plain dicts before they leave this module: the
 envelope is transport detail, and an LLM reading ``data.attributes.title``
 through three layers of nesting wastes context for no gain.
+
+This client now covers both Rootly products: incidents and on-call. The
+on-call half degrades independently when the account lacks that entitlement.
 """
 
 from __future__ import annotations
@@ -24,6 +27,25 @@ import httpx
 
 from integrations.config_models import RootlyIntegrationConfig
 from integrations.probes import ProbeResult
+from integrations.rootly.jsonapi import (
+    attributes,
+    clamp,
+    data_list,
+    meta_total,
+    named,
+    truncate,
+)
+from integrations.rootly.on_call import (
+    ESCALATION_POLICIES_PATH,
+    ON_CALL_PATH,
+    ON_CALL_UNENTITLED_STATUSES,
+    SCHEDULES_PATH,
+    index_included_users,
+    on_call_entitlement_error,
+    shape_escalation_policy,
+    shape_on_call,
+    shape_schedule,
+)
 from platform.observability.errors.service import capture_service_error
 
 logger = logging.getLogger(__name__)
@@ -36,6 +58,8 @@ _MAX_PAGE_SIZE = 50
 _DEFAULT_PAGE_SIZE = 20
 _MAX_EVENT_PAGE_SIZE = 100
 _DEFAULT_EVENT_PAGE_SIZE = 50
+_MAX_ON_CALL_LIMIT = 50
+_DEFAULT_ON_CALL_LIMIT = 20
 _MAX_SUMMARY_CHARS = 2000
 _ERROR_DETAIL_CHARS = 300
 
@@ -50,98 +74,45 @@ _SECRET_RE = re.compile(
 )
 
 
-def _clamp(value: int | None, default: int, maximum: int) -> int:
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(1, min(parsed, maximum))
-
-
-def _attributes(record: Any) -> dict[str, Any]:
-    """Pull ``attributes`` out of one JSON:API resource object."""
-    if not isinstance(record, dict):
-        return {}
-    attributes = record.get("attributes")
-    return attributes if isinstance(attributes, dict) else {}
-
-
-def _data_list(payload: Any) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return []
-    return [item for item in data if isinstance(item, dict)]
-
-
-def _meta_total(payload: Any) -> int | None:
-    if not isinstance(payload, dict):
-        return None
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        return None
-    total = meta.get("total_count")
-    return total if isinstance(total, int) else None
-
-
-def _truncate(text: str, limit: int) -> str:
-    return text if len(text) <= limit else f"{text[:limit]}…"
-
-
-def _named(value: Any) -> str:
-    """Rootly nests severity/status names; accept either a string or an object."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        for key in ("name", "slug", "title"):
-            found = value.get(key)
-            if isinstance(found, str) and found:
-                return found
-    return ""
-
-
 def _shape_incident(record: Any, *, full: bool = False) -> dict[str, Any]:
     """Flatten one incident resource into the fields an RCA actually reads."""
-    attributes = _attributes(record)
+    attrs = attributes(record)
     shaped: dict[str, Any] = {
         "id": str(record.get("id", "")) if isinstance(record, dict) else "",
-        "sequential_id": attributes.get("sequential_id"),
-        "slug": attributes.get("slug", ""),
-        "title": attributes.get("title", ""),
-        "status": attributes.get("status", ""),
-        "severity": _named(attributes.get("severity")),
-        "url": attributes.get("url", ""),
-        "started_at": attributes.get("started_at", ""),
-        "created_at": attributes.get("created_at", ""),
-        "resolved_at": attributes.get("resolved_at", ""),
+        "sequential_id": attrs.get("sequential_id"),
+        "slug": attrs.get("slug", ""),
+        "title": attrs.get("title", ""),
+        "status": attrs.get("status", ""),
+        "severity": named(attrs.get("severity")),
+        "url": attrs.get("url", ""),
+        "started_at": attrs.get("started_at", ""),
+        "created_at": attrs.get("created_at", ""),
+        "resolved_at": attrs.get("resolved_at", ""),
     }
     if full:
         shaped.update(
             {
-                "summary": _truncate(str(attributes.get("summary") or ""), _MAX_SUMMARY_CHARS),
-                "kind": attributes.get("kind", ""),
-                "labels": attributes.get("labels", {}),
-                "mitigated_at": attributes.get("mitigated_at", ""),
-                "acknowledged_at": attributes.get("acknowledged_at", ""),
-                "slack_channel_url": attributes.get("slack_channel_url", ""),
-                "short_url": attributes.get("short_url", ""),
+                "summary": truncate(str(attrs.get("summary") or ""), _MAX_SUMMARY_CHARS),
+                "kind": attrs.get("kind", ""),
+                "labels": attrs.get("labels", {}),
+                "mitigated_at": attrs.get("mitigated_at", ""),
+                "acknowledged_at": attrs.get("acknowledged_at", ""),
+                "slack_channel_url": attrs.get("slack_channel_url", ""),
+                "short_url": attrs.get("short_url", ""),
             }
         )
     return shaped
 
 
 def _shape_event(record: Any) -> dict[str, Any]:
-    attributes = _attributes(record)
+    attrs = attributes(record)
     return {
         "id": str(record.get("id", "")) if isinstance(record, dict) else "",
-        "event": attributes.get("event", ""),
-        "visibility": attributes.get("visibility", ""),
-        "kind": attributes.get("kind", ""),
-        "occurred_at": attributes.get("occurred_at", ""),
-        "created_at": attributes.get("created_at", ""),
+        "event": attrs.get("event", ""),
+        "visibility": attrs.get("visibility", ""),
+        "kind": attrs.get("kind", ""),
+        "occurred_at": attrs.get("occurred_at", ""),
+        "created_at": attrs.get("created_at", ""),
     }
 
 
@@ -240,7 +211,7 @@ class RootlyClient:
         page_size: int | None = _DEFAULT_PAGE_SIZE,
     ) -> dict[str, Any]:
         """List incidents newest-first, optionally filtered."""
-        size = _clamp(page_size, _DEFAULT_PAGE_SIZE, _MAX_PAGE_SIZE)
+        size = clamp(page_size, _DEFAULT_PAGE_SIZE, _MAX_PAGE_SIZE)
         params: dict[str, Any] = {"page[size]": size, "sort": "-created_at"}
         if status:
             params["filter[status]"] = status
@@ -256,8 +227,8 @@ class RootlyClient:
         except Exception as exc:
             return self._error("list_incidents", exc)
 
-        incidents = [_shape_incident(item) for item in _data_list(payload)]
-        total = _meta_total(payload)
+        incidents = [_shape_incident(item) for item in data_list(payload)]
+        total = meta_total(payload)
         return {
             "success": True,
             "incidents": incidents,
@@ -292,7 +263,7 @@ class RootlyClient:
         Causal order is the point of a timeline: reversing it makes the model
         read the resolution before the trigger.
         """
-        size = _clamp(page_size, _DEFAULT_EVENT_PAGE_SIZE, _MAX_EVENT_PAGE_SIZE)
+        size = clamp(page_size, _DEFAULT_EVENT_PAGE_SIZE, _MAX_EVENT_PAGE_SIZE)
         try:
             payload = self._get(
                 f"/v1/incidents/{incident_id}/events",
@@ -301,8 +272,8 @@ class RootlyClient:
         except Exception as exc:
             return self._error("list_incident_events", exc)
 
-        events = [_shape_event(item) for item in _data_list(payload)]
-        total = _meta_total(payload)
+        events = [_shape_event(item) for item in data_list(payload)]
+        total = meta_total(payload)
         return {
             "success": True,
             "incident_id": incident_id,
@@ -351,6 +322,130 @@ class RootlyClient:
             "event": created.get("event", text),
             "visibility": created.get("visibility", resolved_visibility),
             "occurred_at": created.get("occurred_at", ""),
+        }
+
+    def _on_call_error(self, method: str, exc: Exception) -> dict[str, Any]:
+        """Handle on-call specific errors with entitlement degradation."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            # Compare the raw int: HTTPStatus(...) raises ValueError on a
+            # non-standard code (Cloudflare fronts Rootly and emits 5xx codes
+            # outside the enum), which would escape this error handler.
+            status = int(exc.response.status_code)
+            if status in ON_CALL_UNENTITLED_STATUSES:
+                logger.info(
+                    "[rootly] On-call access denied (HTTP %s) - account may lack On-Call product",
+                    status,
+                )
+                return {
+                    "success": False,
+                    "entitled": False,
+                    "error": on_call_entitlement_error(status),
+                }
+        # Fall back to generic error handling
+        return self._error(method, exc)
+
+    def list_on_call(
+        self,
+        *,
+        schedule_id: str = "",
+        escalation_policy_id: str = "",
+        since: str = "",
+        until: str = "",
+        limit: int | None = 20,
+        include_users: bool = True,
+    ) -> dict[str, Any]:
+        """List who is currently on-call with optional filtering."""
+        params: dict[str, Any] = {}
+
+        if include_users:
+            params["include"] = "user"
+        if schedule_id:
+            params["filter[schedule_ids]"] = schedule_id
+        if escalation_policy_id:
+            params["filter[escalation_policy_ids]"] = escalation_policy_id
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+
+        try:
+            payload = self._get(ON_CALL_PATH, params)
+        except Exception as exc:
+            return self._on_call_error("list_on_call", exc)
+
+        on_call_data = data_list(payload)
+        users = index_included_users(payload) if include_users else {}
+
+        # /v1/oncalls has no server paging and no meta, so the limit is applied
+        # client-side and `total` is what Rootly actually handed back.
+        total = len(on_call_data)
+        size = clamp(limit, _DEFAULT_ON_CALL_LIMIT, _MAX_ON_CALL_LIMIT)
+        on_call = [shape_on_call(item, users) for item in on_call_data[:size]]
+
+        return {
+            "success": True,
+            "on_call": on_call,
+            "returned": len(on_call),
+            "total": total,
+            "truncated": total > len(on_call),
+        }
+
+    def list_on_call_schedules(
+        self,
+        *,
+        search: str = "",
+        limit: int | None = 20,
+    ) -> dict[str, Any]:
+        """List on-call schedules with optional search filtering."""
+        size = clamp(limit, _DEFAULT_ON_CALL_LIMIT, _MAX_ON_CALL_LIMIT)
+        params: dict[str, Any] = {"page[size]": size}
+
+        if search:
+            params["filter[search]"] = search
+
+        try:
+            payload = self._get(SCHEDULES_PATH, params)
+        except Exception as exc:
+            return self._on_call_error("list_on_call_schedules", exc)
+
+        schedules = [shape_schedule(item) for item in data_list(payload)]
+        total = meta_total(payload)
+
+        return {
+            "success": True,
+            "schedules": schedules,
+            "returned": len(schedules),
+            "total": total if total is not None else len(schedules),
+            "truncated": bool(total is not None and total > len(schedules)),
+        }
+
+    def list_escalation_policies(
+        self,
+        *,
+        search: str = "",
+        limit: int | None = 20,
+    ) -> dict[str, Any]:
+        """List escalation policies with optional search filtering."""
+        size = clamp(limit, _DEFAULT_ON_CALL_LIMIT, _MAX_ON_CALL_LIMIT)
+        params: dict[str, Any] = {"page[size]": size}
+
+        if search:
+            params["filter[search]"] = search
+
+        try:
+            payload = self._get(ESCALATION_POLICIES_PATH, params)
+        except Exception as exc:
+            return self._on_call_error("list_escalation_policies", exc)
+
+        policies = [shape_escalation_policy(item) for item in data_list(payload)]
+        total = meta_total(payload)
+
+        return {
+            "success": True,
+            "escalation_policies": policies,
+            "returned": len(policies),
+            "total": total if total is not None else len(policies),
+            "truncated": bool(total is not None and total > len(policies)),
         }
 
 
