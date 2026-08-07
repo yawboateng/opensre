@@ -1,0 +1,42 @@
+{{- if eq (include "opensre.ingressKind" .) "gateway-api" -}}
+{{- include "opensre.validateIngress" . -}}
+{{- if not .Values.ingress.gatewayApi.parentRefs }}
+{{- fail "ingress.gatewayApi.parentRefs must name at least one Gateway when ingress.kind=gateway-api." }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "opensre.fullname" . }}-web
+  labels:
+    {{- include "opensre.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- range .Values.ingress.gatewayApi.parentRefs }}
+    - name: {{ .name | quote }}
+      {{- with .namespace }}
+      namespace: {{ . | quote }}
+      {{- end }}
+      {{- with .sectionName }}
+      sectionName: {{ . | quote }}
+      {{- end }}
+    {{- end }}
+  hostnames:
+    - {{ .Values.ingress.host | quote }}
+  rules:
+    # Unlisted paths match no rule, and a Gateway API implementation answers
+    # 404 for those — so this list is the whole exposed surface.
+    - matches:
+        {{- range .Values.ingress.paths }}
+        - path:
+            type: PathPrefix
+            value: {{ . | quote }}
+        {{- end }}
+      backendRefs:
+        - name: {{ include "opensre.webServiceName" . }}
+          port: {{ .Values.web.service.port }}
+{{- end }}

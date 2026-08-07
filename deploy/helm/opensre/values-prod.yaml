@@ -68,6 +68,29 @@ web:
       cpu: "1"
       memory: 1Gi
 
+# Inbound routing for external alert senders (PagerDuty, Rootly, Alertmanager,
+# Grafana). Leave `kind: none` unless something outside the cluster pushes
+# alerts in — Slack/Telegram/Discord dial out and need nothing here.
+#
+# Requires OPENSRE_ALERT_LISTENER_TOKEN in the Secret above; without it both
+# routes answer every caller through the ingress with 403.
+ingress:
+  kind: none
+  # kind: istio — attach to a Gateway the platform team already runs.
+  #   kind: istio
+  #   host: opensre.example.com
+  #   istio:
+  #     gateways: [istio-ingress/default]
+  #
+  # kind: gateway-api — for clusters with the Gateway API CRDs.
+  #   kind: gateway-api
+  #   host: opensre.example.com
+  #   gatewayApi:
+  #     parentRefs: [{name: default, namespace: istio-ingress, sectionName: https}]
+  #
+  # `paths` defaults to ["/alerts"] and is an allowlist. /health, /healthz,
+  # /readyz and /ok are not token-gated, so never route "/".
+
 # Slack/Telegram + scheduler: exactly one replica (Socket Mode is single-consumer).
 gateway:
   enabled: true

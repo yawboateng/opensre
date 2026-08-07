@@ -53,6 +53,111 @@ so the symptom appears only once someone types. Without
 organization's identity and inherits its credentials; set it to fail closed.
 Details in [docs/principal-scoped-storage.mdx](../../../docs/principal-scoped-storage.mdx).
 
+## Inbound routing (`ingress`)
+
+Off by default. Turn it on only when something outside the cluster needs to
+push alerts in — PagerDuty, Rootly, Alertmanager, Grafana. Slack, Telegram and
+Discord need nothing here; the gateway dials out.
+
+Pick one renderer with `ingress.kind`:
+
+| `kind` | Renders | Needs |
+| --- | --- | --- |
+| `none` (default) | nothing | — |
+| `ingress` | `networking.k8s.io/v1` Ingress | an ingress controller |
+| `istio` | `networking.istio.io/v1` VirtualService, and a Gateway if you ask for one | Istio CRDs |
+| `gateway-api` | `gateway.networking.k8s.io/v1` HTTPRoute | Gateway API CRDs |
+
+On a shared cluster the platform team usually already runs a Gateway that
+terminates TLS for a wildcard host. Attach to it rather than creating another:
+
+```yaml
+ingress:
+  kind: istio
+  host: opensre.example.com
+  istio:
+    gateways: [istio-ingress/default]   # namespace/name of the existing Gateway
+```
+
+Standalone, with its own Gateway and certificate:
+
+```yaml
+ingress:
+  kind: istio
+  host: opensre.example.com
+  istio:
+    gateway:
+      create: true
+      selector: { istio: ingressgateway }   # must match the gateway pods' labels
+      tls: { credentialName: opensre-tls }  # Secret in the GATEWAY's namespace
+```
+
+Gateway API, for clusters that have the CRDs:
+
+```yaml
+ingress:
+  kind: gateway-api
+  host: opensre.example.com
+  gatewayApi:
+    parentRefs:
+      - { name: default, namespace: istio-ingress, sectionName: https }
+```
+
+The referenced Gateway must allow routes from this release's namespace
+(`listeners[].allowedRoutes`), which is a setting on the Gateway, not here.
+
+### Attaching to a shared Gateway: check the certificate, not just the host
+
+A Gateway that host-matches `*.example.com` does **not** necessarily hold a
+wildcard certificate. Istio matches the hostname and the TLS credential is a
+separate object, so the route can be perfectly configured and HTTPS still fails
+because the certificate's SAN list has no entry for your host. The symptom is a
+TLS error or a proxy `502` — not a `404` — and plain `:80` works fine, which
+makes it look like a certificate problem somewhere else.
+
+```bash
+openssl s_client -connect <gateway-ip>:443 -servername <your-host> </dev/null 2>/dev/null \
+  | openssl x509 -noout -text | grep -A1 'Subject Alternative Name'
+```
+
+Run it from outside any TLS-inspecting corporate proxy, or you will read the
+proxy's re-signed certificate instead of the origin's. Adding your host means
+editing the Gateway owner's certificate — often a cert-manager `Certificate`
+under GitOps with `selfHeal`, where a live `kubectl edit` is silently reverted.
+
+### Only `/alerts` is routed
+
+`ingress.paths` defaults to `["/alerts"]` and is an allowlist. The web app also
+serves `/health`, `/healthz`, `/readyz` and `/ok`, and **none of those are
+token-gated** — routing `/` publishes cluster health to anyone who resolves the
+hostname. Add `/investigate` only deliberately: it runs a full LLM
+investigation synchronously, so every request costs money and occupies a
+worker until it finishes.
+
+### The token is not optional
+
+`/alerts` and `/investigate` are gated by `OPENSRE_ALERT_LISTENER_TOKEN`
+(a plain bearer token, compared with `hmac.compare_digest`). Unset, both routes
+serve loopback callers only and answer everyone else `403` — so an ingress
+without the token exposes a route that cannot work.
+
+```yaml
+secret:
+  data:
+    OPENSRE_ALERT_LISTENER_TOKEN: "<32+ random bytes>"
+```
+
+The chart **fails to render** if `ingress.kind` is set while a chart-rendered
+Secret has no token. With `secret.existingSecret` it cannot look, so it warns
+in `NOTES.txt` instead. Senders authenticate with:
+
+```
+Authorization: Bearer <token>
+```
+
+Setting the token also changes local behaviour: once it is set, loopback
+callers must present it too.
+
 ## Secrets
 
 `secret.create=true` (default) renders a Secret from `secret.data`. **Do not
@@ -139,6 +244,9 @@ Keep credentials out of `values-prod.yaml`; supply them through the
 | `config.llmProvider` | `anthropic` | LLM provider (key goes in the Secret; `vertex-ai`/`bedrock` need none) |
 | `web.enabled` / `gateway.enabled` | `true` / `true` | which workloads to run |
 | `web.autoscaling.enabled` | `false` | HPA for the web Deployment |
+| `ingress.kind` | `none` | `none` / `ingress` / `istio` / `gateway-api` |
+| `ingress.host` | `""` | external hostname; required unless `kind: none` |
+| `ingress.paths` | `["/alerts"]` | path prefixes routed — an allowlist |
 | `secret.create` / `secret.existingSecret` | `true` / `""` | render Secret vs reference one |
 | `postgresql.uri` / `postgresql.bundled` | `""` / `false` | external vs bundled Postgres |
 | `redis.uri` / `redis.bundled` | `""` / `false` | external vs bundled Redis |

@@ -1,0 +1,79 @@
+{{- if eq (include "opensre.ingressKind" .) "istio" -}}
+{{- include "opensre.validateIngress" . -}}
+{{- $gwCreate := .Values.ingress.istio.gateway.create -}}
+{{- if $gwCreate }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "opensre.fullname" . }}-web
+  labels:
+    {{- include "opensre.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    {{- toYaml .Values.ingress.istio.gateway.selector | nindent 4 }}
+  servers:
+    {{- $tls := .Values.ingress.istio.gateway.tls }}
+    {{- if $tls.credentialName }}
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      hosts:
+        - {{ $.Values.ingress.host | quote }}
+      tls:
+        mode: {{ $tls.mode | default "SIMPLE" }}
+        credentialName: {{ $tls.credentialName | quote }}
+    {{- else }}
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - {{ $.Values.ingress.host | quote }}
+    {{- end }}
+---
+{{- end }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "opensre.fullname" . }}-web
+  labels:
+    {{- include "opensre.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  hosts:
+    - {{ .Values.ingress.host | quote }}
+  gateways:
+    {{- if $gwCreate }}
+    - {{ include "opensre.fullname" . }}-web
+    {{- else }}
+    {{- if not .Values.ingress.istio.gateways }}
+    {{- fail "ingress.istio.gateways must name at least one existing Gateway (as namespace/name), or set ingress.istio.gateway.create=true." }}
+    {{- end }}
+    {{- toYaml .Values.ingress.istio.gateways | nindent 4 }}
+    {{- end }}
+  http:
+    # One route per prefix rather than one route with several matches: Istio
+    # evaluates routes in order and stops at the first whose match set hits,
+    # so a request to an unlisted path falls through to a 404 at the gateway
+    # instead of reaching the app.
+    {{- range .Values.ingress.paths }}
+    - match:
+        - uri:
+            prefix: {{ . | quote }}
+      route:
+        - destination:
+            host: {{ printf "%s.%s.svc.cluster.local" (include "opensre.webServiceName" $) $.Release.Namespace | quote }}
+            port:
+              number: {{ $.Values.web.service.port }}
+    {{- end }}
+{{- end }}
