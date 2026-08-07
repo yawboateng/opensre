@@ -248,6 +248,12 @@ from config.constants.redis import (
     REDIS_SSL_ENV,
     REDIS_USERNAME_ENV,
 )
+from config.constants.rootly import (
+    DEFAULT_ROOTLY_TIMEOUT_SECONDS,
+    ROOTLY_API_TOKEN_ENV,
+    ROOTLY_BASE_URL_ENV,
+    ROOTLY_TIMEOUT_SECONDS_ENV,
+)
 from config.constants.runtime_metadata import (
     GITHUB_REPO_ENV,
     GITHUB_REPOSITORY_ENV,
@@ -516,6 +522,10 @@ __all__ = [
     "REDIS_PORT_ENV",
     "REDIS_SSL_ENV",
     "REDIS_USERNAME_ENV",
+    "DEFAULT_ROOTLY_TIMEOUT_SECONDS",
+    "ROOTLY_API_TOKEN_ENV",
+    "ROOTLY_BASE_URL_ENV",
+    "ROOTLY_TIMEOUT_SECONDS_ENV",
     "GITHUB_REPO_ENV",
     "GITHUB_REPOSITORY_ENV",
     "OPENSRE_ALLOW_NETWORK_ENV",

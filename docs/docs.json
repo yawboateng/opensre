@@ -143,6 +143,7 @@
               "pagerduty",
               "posthog",
               "posthog-mcp",
+              "rootly",
               "sentry",
               "sentry-mcp",
               "servicenow",

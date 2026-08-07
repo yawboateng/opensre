@@ -280,6 +280,8 @@ from integrations.registry import (
     service_key,
 )
 from integrations.rocketchat import classify as _classify_rocketchat
+from integrations.rootly import classify as _classify_rootly
+from integrations.rootly import rootly_config_from_env
 from integrations.sentry import build_sentry_config
 from integrations.sentry import classify as _classify_sentry
 from integrations.sentry_mcp import DEFAULT_SENTRY_MCP_URL, build_sentry_mcp_config
@@ -440,6 +442,7 @@ _CLASSIFIERS: dict[str, _ClassifyFn] = {
     "opsgenie": _classify_opsgenie,
     "pagerduty": _classify_pagerduty,
     "incident_io": _classify_incident_io,
+    "rootly": _classify_rootly,
     "jira": _classify_jira,
     "servicenow": _classify_servicenow,
     "discord": _classify_discord,
@@ -1840,6 +1843,18 @@ def load_env_integrations() -> list[dict[str, Any]]:
             )
     except Exception as exc:
         _report_env_loader_failure(exc, integration="signoz")
+
+    try:
+        rootly_config = rootly_config_from_env()
+        if rootly_config is not None and rootly_config.is_configured:
+            integrations.append(
+                _active_env_record(
+                    "rootly",
+                    rootly_config.model_dump(exclude={"integration_id"}),
+                )
+            )
+    except Exception as exc:
+        _report_env_loader_failure(exc, integration="rootly")
 
     try:
         jenkins_config = jenkins_config_from_env()

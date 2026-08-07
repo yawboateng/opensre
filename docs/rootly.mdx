@@ -1,0 +1,68 @@
+---
+title: "Rootly"
+description: "Connect Rootly so OpenSRE can read incident context and record findings on the incident timeline"
+---
+
+OpenSRE can read Rootly incidents during an investigation and — with your approval — append findings to an incident's timeline, so the RCA lands on the incident the retrospective will actually read.
+
+Both tools are available in chat as well as during an investigation, so you can ask about an incident from Slack, Discord, or Telegram.
+
+## Prerequisites
+
+- A Rootly account
+- A Rootly API key with read access to incidents and incident events
+- Write access on incident events if you want OpenSRE to post timeline notes
+
+## Setup
+
+### Interactive CLI
+
+```bash
+opensre integrations setup rootly
+```
+
+### Environment variables
+
+```bash
+ROOTLY_API_TOKEN=your-api-key
+```
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ROOTLY_API_TOKEN` | - | Required Rootly API key |
+| `ROOTLY_BASE_URL` | `https://api.rootly.com` | Optional API URL override for tests or private routing |
+| `ROOTLY_TIMEOUT_SECONDS` | `15` | Optional per-request timeout. Raise it if your Rootly account is slow to answer |
+
+## Verify
+
+```bash
+opensre integrations verify rootly
+```
+
+Verification performs a minimal `GET /v1/incidents` request.
+
+## Reading incidents
+
+`rootly_incidents` is read-only and takes an `action`:
+
+| Action | What it returns |
+| --- | --- |
+| `list` | Recent incidents, newest first. Filter with `status`, `severity`, `created_after`, or a free-text `search` |
+| `get` | One incident with its summary, severity, status, and timestamps |
+| `events` | An incident's timeline, oldest first |
+
+`get` and `events` need an `incident_id` — Rootly's incident id or its slug. When an alert already names an incident, OpenSRE defaults to `get`.
+
+Listings are capped at 50 incidents and 100 timeline events per call. When Rootly holds more, the result sets `truncated`.
+
+## Posting to a timeline
+
+`rootly_post_timeline_event` appends one event to an incident's timeline. Every call asks for approval first, and the prompt shows the note exactly as it will appear.
+
+The write is append-only. It cannot edit an existing event, change an incident's status, or resolve an incident.
+
+<Warning>
+`visibility` defaults to `internal`, which responders see. Setting it to `external` publishes the note to your customer-facing status timeline, and it cannot be quietly walked back — ask for `external` only when you mean it. Anything OpenSRE does not recognise as `external` is treated as internal.
+</Warning>
+
+Rootly stamps the time when the event is created, so do not put a timestamp in the note.
