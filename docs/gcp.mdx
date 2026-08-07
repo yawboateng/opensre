@@ -26,6 +26,8 @@ Everything else is opt-in, one service at a time. Enable the API and grant the r
 
 A missing API or role disables the tool that needs it; it does not break the rest. On a multi-project query, a project that denies one call is reported in `partial_errors` and the projects that answered are still returned.
 
+A project that has simply never enabled the API is different: it cannot hold that kind of resource, so it is skipped silently rather than reported as a failure. You only see the projects that genuinely could not be read. This matters most with `GCP_ADDITIONAL_PROJECTS=discover`, where most of the estate will not run every service.
+
 ## Setup
 
 The wizard walks through the three auth paths below and verifies the result:
@@ -407,6 +409,8 @@ gcp     │ local env │ ✓ passed │ Connected to GCP project acme-prod (acm
 
 This makes a real API call, so it catches the case that a shape check cannot: credentials that resolve to the *wrong* principal.
 
+With `GCP_ADDITIONAL_PROJECTS=discover` the count is what the credential actually reads, not what you wrote down — `scope covers 12 discovered projects`. If the listing itself failed you get `1 configured project; project discovery unavailable (…)` instead, which still passes: the tools work, on the projects you named explicitly.
+
 ## Example queries
 
 GKE container errors in a namespace:
@@ -456,7 +460,8 @@ metric.type="kubernetes.io/container/memory/used_bytes" AND resource.labels.name
 | **Every subscription reports `backlog_unknown`** | The principal has `roles/pubsub.viewer` but not `roles/monitoring.viewer`. The backlog metrics live in Cloud Monitoring, not in the Pub/Sub API. |
 | **A Pub/Sub backlog never drains** | Check `dead_letter_topic`. An empty value means a poison message is retried forever. For a `push` subscription, the failing consumer is the endpoint in `push_endpoint`, not a worker you can inspect. |
 | **`gcp_error_reporting_top_errors` returns nothing during a real incident** | Error Reporting only clusters exceptions that reach it. A service logging errors as plain text without a stack trace never appears. Use `gcp_logging_query` with `severity=ERROR`. |
-| **`partial_errors` on a multi-project listing** | One project denied the call while others answered; the results you got are real. The message names the project and the missing permission — usually one of the per-service viewer roles in [Prerequisites](#prerequisites). |
+| **`partial_errors` on a multi-project listing** | One project denied the call while others answered; the results you got are real. The message names the project and the missing permission — usually one of the per-service viewer roles in [Prerequisites](#prerequisites). A project with the API switched off is not listed here — it is skipped, since it can hold nothing to find. |
+| **A project you expected results from is missing, with no error** | Its API is off, so it was skipped. Enable the API from the table in [Prerequisites](#prerequisites) — the role alone is not enough. |
 | **`unreachable_locations` / `unreachable_scopes` in a result** | Google could not reach a zone, so the listing is incomplete. Re-run; if it persists, check the [GCP status dashboard](https://status.cloud.google.com/). |
 
 ## Security best practices

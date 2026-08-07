@@ -24,6 +24,7 @@ from integrations.gcp.client import (
     MONITORING_API,
     PUBSUB_API,
     GCPClientError,
+    api_not_enabled,
     build_service,
     describe_api_error,
 )
@@ -225,6 +226,10 @@ def gcp_pubsub_backlog(
             try:
                 response = _list_subscriptions(pubsub, target, page_size)
             except Exception as exc:
+                if api_not_enabled(exc):
+                    # Pub/Sub is off here, so the project has no subscriptions —
+                    # which is the answer, not a failure to get one.
+                    continue
                 report_run_error(
                     exc,
                     tool_name="gcp_pubsub_backlog",

@@ -288,6 +288,16 @@ def register_now(logger: logging.Logger, scope: ScopeSpec) -> RegistrationSummar
 
     for error in report.errors:
         logger.warning("GKE auto-registration: %s", error)
+    if report.no_gke:
+        # One line, not one per project: with a discovered project list most of
+        # the estate has no GKE, and a warning each would repeat every refresh
+        # and drown the projects that did fail. Still named, so a project that
+        # was expected to hold clusters can be spotted.
+        logger.info(
+            "GKE auto-registration: %d project(s) have no Kubernetes Engine API — %s",
+            len(report.no_gke),
+            ", ".join(report.no_gke),
+        )
     if report.excluded:
         # The scope is operator intent, so this is confirmation rather than a
         # problem — but it is also the only place a mistyped cluster name shows

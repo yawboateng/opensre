@@ -312,6 +312,7 @@ class _SlackTurnDispatcher:
                 client=self._messaging,
                 channel_id=inbound.channel_id,
                 thread_ts=inbound.thread_ts,
+                team_id=inbound.team_id,
                 update_interval_seconds=self._settings.status_update_interval_seconds,
                 tool_hooks=approval_tool_hooks(prompter),
             )

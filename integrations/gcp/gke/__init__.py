@@ -13,7 +13,7 @@ from integrations.gcp.gke.autoregister import (
     requested_scope,
     start_gke_autoregistration,
 )
-from integrations.gcp.gke.discovery import DiscoveredCluster, discover_clusters
+from integrations.gcp.gke.discovery import DiscoveredCluster, Discovery, discover_clusters
 from integrations.gcp.gke.kubeconfig import AUTH_PLUGIN, build_kubeconfig, plugin_installed
 from integrations.gcp.gke.registration import (
     ClusterRegistration,
@@ -35,6 +35,7 @@ __all__ = [
     "ClusterScope",
     "ClusterRegistration",
     "DiscoveredCluster",
+    "Discovery",
     "Outcome",
     "RegistrationReport",
     "ScopeSpec",

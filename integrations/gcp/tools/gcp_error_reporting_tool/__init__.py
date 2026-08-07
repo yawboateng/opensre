@@ -21,6 +21,7 @@ from integrations.gcp.availability import gcp_available
 from integrations.gcp.client import (
     ERROR_REPORTING_API,
     GCPClientError,
+    api_not_enabled,
     build_service,
     describe_api_error,
 )
@@ -237,6 +238,10 @@ def gcp_error_reporting_top_errors(
                     client, target, PERIODS[window], ORDERS[ranking], page_size, service_filter
                 )
             except Exception as exc:
+                if api_not_enabled(exc):
+                    # The API is off here, so the project reports no errors —
+                    # which is the answer, not a failure to get one.
+                    continue
                 report_run_error(
                     exc,
                     tool_name="gcp_error_reporting_top_errors",

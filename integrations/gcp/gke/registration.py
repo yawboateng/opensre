@@ -61,6 +61,10 @@ class RegistrationReport:
     #: fails is a typo in a cluster name, and "registered 0" on its own gives an
     #: operator nothing to compare their spelling against.
     excluded: list[str] = field(default_factory=list)
+    #: Projects with no Kubernetes Engine API, which therefore cannot hold a
+    #: cluster. Not an error, but still named: the way a project selector fails
+    #: is a project that was expected to have clusters and turns out not to.
+    no_gke: list[str] = field(default_factory=list)
 
     def count(self, outcome: Outcome) -> int:
         """Return how many clusters ended in ``outcome``."""
@@ -177,8 +181,10 @@ def register_gke_clusters(
         return report
 
     project_configs: dict[str, dict[str, Any]] = scope.get("project_configs") or {}
-    clusters, discovery_errors = discover_clusters(projects, project_configs)
-    report.errors.extend(discovery_errors)
+    discovery = discover_clusters(projects, project_configs)
+    clusters = discovery.clusters
+    report.errors.extend(discovery.errors)
+    report.no_gke.extend(discovery.no_gke)
 
     if cluster_scope is not None:
         admitted: list[DiscoveredCluster] = []

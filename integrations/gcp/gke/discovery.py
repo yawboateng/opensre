@@ -17,7 +17,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from integrations.gcp.client import CONTAINER_API, GCPClientError, build_service, describe_api_error
+from integrations.gcp.client import (
+    CONTAINER_API,
+    GCPClientError,
+    api_not_enabled,
+    build_service,
+    describe_api_error,
+)
 from integrations.gcp.projects import group_projects
 from integrations.gcp.tool_params import config_from
 from integrations.gcp.tools.gcp_list_gke_clusters_tool.clusters import RUNNING, kubeconfig_context
@@ -80,19 +86,37 @@ def _list_project(service: Any, project: str) -> list[DiscoveredCluster]:
     return [_to_cluster(item, project) for item in found if isinstance(item, dict)]
 
 
+@dataclass(frozen=True)
+class Discovery:
+    """What one sweep across a set of projects found.
+
+    ``no_gke`` is kept apart from ``errors`` because the two want different
+    reporting: a project with the Kubernetes Engine API switched off simply has
+    no clusters, and listing every one of them as a failure is what buries the
+    projects that genuinely could not be read.
+    """
+
+    clusters: list[DiscoveredCluster]
+    errors: list[str]
+    no_gke: list[str]
+
+
 def discover_clusters(
     projects: list[str],
     project_configs: dict[str, dict[str, Any]] | None,
-) -> tuple[list[DiscoveredCluster], list[str]]:
-    """Return ``(clusters, errors)`` across ``projects``.
+) -> Discovery:
+    """Discover the reachable GKE clusters across ``projects``.
 
     One API client per credential, one request per project — the same shape as
     the tools, so a single-credential estate authenticates once. A project that
     denies ``container.clusters.list`` contributes an error string and is
-    skipped; it never aborts the projects that would have succeeded.
+    skipped; it never aborts the projects that would have succeeded. A project
+    with no Kubernetes Engine API is recorded in ``no_gke`` instead, since it
+    cannot hold a cluster and so has nothing to report.
     """
     clusters: list[DiscoveredCluster] = []
     errors: list[str] = []
+    no_gke: list[str] = []
 
     for config_payload, group in group_projects(projects, project_configs):
         try:
@@ -106,5 +130,8 @@ def discover_clusters(
             try:
                 clusters.extend(_list_project(service, project))
             except Exception as exc:
+                if api_not_enabled(exc):
+                    no_gke.append(project)
+                    continue
                 errors.append(f"{project}: {describe_api_error(exc)}")
-    return clusters, errors
+    return Discovery(clusters=clusters, errors=errors, no_gke=no_gke)

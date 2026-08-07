@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -9,7 +10,7 @@ import yaml
 
 from integrations.gcp.gke import discovery as discovery_module
 from integrations.gcp.gke import registration as registration_module
-from integrations.gcp.gke.discovery import DiscoveredCluster, discover_clusters
+from integrations.gcp.gke.discovery import DiscoveredCluster, Discovery, discover_clusters
 from integrations.gcp.gke.kubeconfig import (
     AUTH_PLUGIN,
     build_kubeconfig,
@@ -283,7 +284,7 @@ def test_discovery_asks_every_location_of_every_project(monkeypatch: pytest.Monk
     pages = [{"clusters": [_raw_cluster()]}, {"clusters": [_raw_cluster(name="staging")]}]
     _install_discovery(monkeypatch, _FakeContainerService(parents, pages), builds)
 
-    clusters, errors = discover_clusters(
+    discovered = discover_clusters(
         ["acme", "acme-staging"],
         {"acme": _ONE_CREDENTIAL, "acme-staging": _ONE_CREDENTIAL},
     )
@@ -291,8 +292,9 @@ def test_discovery_asks_every_location_of_every_project(monkeypatch: pytest.Monk
     assert parents == ["projects/acme/locations/-", "projects/acme-staging/locations/-"]
     # One credential reaches both projects, so authentication happens once.
     assert len(builds) == 1
-    assert [cluster.name for cluster in clusters] == ["prod", "staging"]
-    assert errors == []
+    assert [cluster.name for cluster in discovered.clusters] == ["prod", "staging"]
+    assert discovered.errors == []
+    assert discovered.no_gke == []
 
 
 def test_discovery_builds_one_client_per_credential(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -313,7 +315,7 @@ def test_discovery_captures_the_endpoint_and_ca_the_tool_drops(
     pages = [{"clusters": [_raw_cluster(endpoint="34.1.2.3", private=True)]}]
     _install_discovery(monkeypatch, _FakeContainerService([], pages))
 
-    clusters, _errors = discover_clusters(["acme"], {"acme": _ONE_CREDENTIAL})
+    clusters = discover_clusters(["acme"], {"acme": _ONE_CREDENTIAL}).clusters
 
     assert clusters[0].endpoint == "34.1.2.3"
     assert clusters[0].ca_certificate == _CA
@@ -330,7 +332,7 @@ def test_discovery_falls_back_to_the_deprecated_zone_field(
     raw["zone"] = "us-east1-b"
     _install_discovery(monkeypatch, _FakeContainerService([], [{"clusters": [raw]}]))
 
-    clusters, _errors = discover_clusters(["acme"], {"acme": _ONE_CREDENTIAL})
+    clusters = discover_clusters(["acme"], {"acme": _ONE_CREDENTIAL}).clusters
 
     assert clusters[0].location == "us-east1-b"
     assert clusters[0].context == "gke_acme_us-east1-b_prod"
@@ -343,7 +345,7 @@ def test_discovery_tolerates_a_cluster_with_no_master_auth(
     del raw["masterAuth"]
     _install_discovery(monkeypatch, _FakeContainerService([], [{"clusters": [raw]}]))
 
-    clusters, _errors = discover_clusters(["acme"], {"acme": _ONE_CREDENTIAL})
+    clusters = discover_clusters(["acme"], {"acme": _ONE_CREDENTIAL}).clusters
 
     assert clusters[0].ca_certificate == ""
 
@@ -353,14 +355,80 @@ def test_one_denied_project_does_not_discard_the_others(
 ) -> None:
     _install_discovery(monkeypatch, _RaisingContainerService("acme-staging"))
 
-    clusters, errors = discover_clusters(
+    discovered = discover_clusters(
         ["acme", "acme-staging"],
         {"acme": _ONE_CREDENTIAL, "acme-staging": _ONE_CREDENTIAL},
     )
 
-    assert len(clusters) == 1
-    assert len(errors) == 1
-    assert "acme-staging" in errors[0]
+    assert len(discovered.clusters) == 1
+    assert len(discovered.errors) == 1
+    assert "acme-staging" in discovered.errors[0]
+    assert discovered.no_gke == []
+
+
+class _ApiOffResponse:
+    status = 403
+
+
+class _ApiOffError(Exception):
+    """What ``container/v1`` raises when the project never enabled the API.
+
+    Same 403 and same ``PERMISSION_DENIED`` status as a real denial — only
+    ``details[].reason`` tells them apart.
+    """
+
+    resp = _ApiOffResponse()
+    content = json.dumps(
+        {
+            "error": {
+                "code": 403,
+                "message": "Kubernetes Engine API has not been used in project x before",
+                "status": "PERMISSION_DENIED",
+                "details": [{"reason": "SERVICE_DISABLED", "domain": "googleapis.com"}],
+            }
+        }
+    ).encode()
+
+
+class _ApiOffClusters:
+    def __init__(self, disabled_project: str) -> None:
+        self._disabled = disabled_project
+        self._parent = ""
+
+    def list(self, parent: str) -> _ApiOffClusters:
+        self._parent = parent
+        return self
+
+    def execute(self) -> dict[str, Any]:
+        if f"projects/{self._disabled}/" in self._parent:
+            raise _ApiOffError()
+        return {"clusters": [_raw_cluster()]}
+
+
+class _ApiOffContainerService:
+    def __init__(self, disabled_project: str) -> None:
+        self._projects = _FakeProjects(_FakeLocations(_ApiOffClusters(disabled_project)))
+
+    def projects(self) -> _FakeProjects:
+        return self._projects
+
+
+def test_a_project_without_the_api_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A project that never enabled GKE cannot hold a cluster, so it has nothing to report.
+
+    Counting it as a failure is what buries the projects that genuinely could
+    not be read, and on a discovered project list most of the estate is this.
+    """
+    _install_discovery(monkeypatch, _ApiOffContainerService("acme-staging"))
+
+    discovered = discover_clusters(
+        ["acme", "acme-staging"],
+        {"acme": _ONE_CREDENTIAL, "acme-staging": _ONE_CREDENTIAL},
+    )
+
+    assert [cluster.project for cluster in discovered.clusters] == ["acme"]
+    assert discovered.errors == []
+    assert discovered.no_gke == ["acme-staging"]
 
 
 def test_a_credential_that_cannot_be_built_reports_its_whole_group(
@@ -371,13 +439,13 @@ def test_a_credential_that_cannot_be_built_reports_its_whole_group(
 
     monkeypatch.setattr(discovery_module, "build_service", _build)
 
-    clusters, errors = discover_clusters(
+    discovered = discover_clusters(
         ["acme", "acme-staging"],
         {"acme": _ONE_CREDENTIAL, "acme-staging": _ONE_CREDENTIAL},
     )
 
-    assert clusters == []
-    assert errors == ["acme, acme-staging: no Google credentials available"]
+    assert discovered.clusters == []
+    assert discovered.errors == ["acme, acme-staging: no Google credentials available"]
 
 
 # --- registration ------------------------------------------------------------
@@ -408,11 +476,10 @@ def _install_registration(
     store: _RecordingStore,
     clusters: list[DiscoveredCluster],
     errors: list[str] | None = None,
+    no_gke: list[str] | None = None,
 ) -> None:
-    def _discover(
-        _projects: list[str], _configs: dict[str, Any] | None
-    ) -> tuple[list[DiscoveredCluster], list[str]]:
-        return clusters, list(errors or [])
+    def _discover(_projects: list[str], _configs: dict[str, Any] | None) -> Discovery:
+        return Discovery(clusters=clusters, errors=list(errors or []), no_gke=list(no_gke or []))
 
     monkeypatch.setattr(registration_module, "discover_clusters", _discover)
     monkeypatch.setattr(registration_module, "list_clusters", store.list_clusters)
@@ -657,6 +724,20 @@ def test_discovery_errors_surface_on_the_report(monkeypatch: pytest.MonkeyPatch)
 
     assert report.errors == ["acme: HTTP 403: denied"]
     assert report.results == []
+
+
+def test_projects_without_the_api_are_named_but_kept_out_of_the_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still named: the way a project selector goes wrong is a project that turns out empty."""
+    store = _RecordingStore()
+    _install_registration(monkeypatch, store, [_cluster()], no_gke=["acme-staging"])
+
+    report = register_gke_clusters(resolved=_resolved())
+
+    assert report.errors == []
+    assert report.no_gke == ["acme-staging"]
+    assert report.count(Outcome.REGISTERED) == 1
 
 
 def test_no_gcp_configured_reports_a_configuration_error(
