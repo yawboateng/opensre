@@ -15,7 +15,40 @@ from integrations.gcp.client import (
     build_service,
     describe_api_error,
 )
+from integrations.gcp.project_discovery import MAX_DISCOVERED, discover
 from integrations.verification import register_verifier, result
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _reach(cfg: GCPIntegrationConfig) -> str:
+    """Describe how many projects this credential actually reaches.
+
+    ``all_projects`` is what configuration *names*, which is the wrong answer
+    under ``GCP_ADDITIONAL_PROJECTS=discover``: there the whole point is that
+    the estate is not written down. Reporting "1 project" for a credential that
+    reads twelve reads as a misconfiguration, and sends the operator looking for
+    a fault that is not there.
+
+    The listing is the memoized one the tools use, not a fresh probe. Verify
+    answers "what will a tool see" — a fresh probe could report a reach the next
+    tool call does not have, and would cost a round trip the cache already paid.
+    """
+    configured = cfg.all_projects
+    if not cfg.discovery_requested:
+        return _plural(len(configured), "project")
+
+    found = discover(cfg)
+    if found.error:
+        # Still ``passed``: the tools work, on a narrower estate than asked for.
+        return (
+            f"{_plural(len(configured), 'configured project')}; "
+            f"project discovery unavailable ({found.error})"
+        )
+    reach = _plural(len({*configured, *found.projects}), "discovered project")
+    return f"{reach}, capped at {MAX_DISCOVERED}" if found.truncated else reach
 
 
 @register_verifier("gcp")
@@ -49,8 +82,7 @@ def verify_gcp(source: str, config: dict[str, Any]) -> dict[str, str]:
         )
 
     name = str(project.get("name", "")).strip() or cfg.project_id
-    scope = len(cfg.all_projects)
-    reach = "1 project" if scope == 1 else f"{scope} projects"
+    reach = _reach(cfg)
     mode = (
         "service-account key"
         if cfg.service_account_key

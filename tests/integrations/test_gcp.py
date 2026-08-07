@@ -12,7 +12,7 @@ from integrations._catalog_impl import classify_integrations, load_env_integrati
 from integrations.config_models import GCPIntegrationConfig
 from integrations.gcp import classify
 from integrations.gcp.availability import gcp_available
-from integrations.gcp.client import GCPClientError, describe_api_error
+from integrations.gcp.client import GCPClientError, api_not_enabled, describe_api_error
 from integrations.gcp.projects import group_projects, resolve_projects, resource_names
 from integrations.gcp.tool_params import gcp_tool_params
 
@@ -243,6 +243,70 @@ def test_describe_api_error_falls_back_to_the_exception_type() -> None:
     assert describe_api_error(ValueError("boom")) == "ValueError calling the Google API"
 
 
+# --- disabled API vs denied permission ---------------------------------------
+#
+# Google returns HTTP 403 PERMISSION_DENIED for both, so these fixtures differ
+# only in ``details[].reason`` — the one field that separates them.
+
+_DISABLED_MESSAGE = (
+    "Kubernetes Engine API has not been used in project acme before or it is disabled."
+)
+
+
+def _http_error(payload: dict[str, Any]) -> Exception:
+    error = Exception()
+    error.resp = _FakeResponse()  # type: ignore[attr-defined]
+    error.content = json.dumps({"error": payload}).encode()  # type: ignore[attr-defined]
+    return error
+
+
+def _service_disabled() -> Exception:
+    return _http_error(
+        {
+            "code": 403,
+            "message": _DISABLED_MESSAGE,
+            "status": "PERMISSION_DENIED",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "SERVICE_DISABLED",
+                    "domain": "googleapis.com",
+                    "metadata": {"service": "container.googleapis.com"},
+                }
+            ],
+        }
+    )
+
+
+def test_api_not_enabled_recognises_a_disabled_service() -> None:
+    assert api_not_enabled(_service_disabled()) is True
+
+
+def test_api_not_enabled_rejects_a_real_permission_denial() -> None:
+    """A denial carries the same 403 and status, so only the reason may decide."""
+    denied = _http_error(
+        {
+            "code": 403,
+            "message": "Required 'container.clusters.list' permission",
+            "status": "PERMISSION_DENIED",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "IAM_PERMISSION_DENIED",
+                }
+            ],
+        }
+    )
+
+    assert api_not_enabled(denied) is False
+
+
+def test_api_not_enabled_rejects_an_unrecognisable_error() -> None:
+    """Fail safe: anything this cannot positively identify stays an error."""
+    assert api_not_enabled(_FakeHttpError()) is False
+    assert api_not_enabled(ValueError("boom")) is False
+
+
 # --- verifier ----------------------------------------------------------------
 
 
@@ -306,3 +370,93 @@ def test_verify_gcp_reports_auth_mode_and_scope(monkeypatch: pytest.MonkeyPatch)
     assert "Acme Prod (acme-prod)" in result["detail"]
     assert "via impersonation" in result["detail"]
     assert "2 projects" in result["detail"]
+
+
+# --- scope under GCP_ADDITIONAL_PROJECTS=discover -----------------------------
+#
+# The configured list is one project; the credential reads a whole folder. What
+# the verifier must not do is report the former as the reach.
+
+
+def _stub_discovery(monkeypatch: pytest.MonkeyPatch, found: Any) -> None:
+    from integrations.gcp import verifier
+
+    def _discover(_config: Any) -> Any:
+        return found
+
+    monkeypatch.setattr(verifier, "build_service", _build_stub_service)
+    monkeypatch.setattr(verifier, "discover", _discover)
+
+
+def _discovered(*projects: str, error: str = "", truncated: bool = False) -> Any:
+    from integrations.gcp.project_discovery import DiscoveryResult
+
+    return DiscoveryResult(projects=projects, error=error, truncated=truncated)
+
+
+def test_verify_gcp_counts_discovered_projects_not_configured_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from integrations.gcp import verifier
+
+    _stub_discovery(monkeypatch, _discovered("acme-prod", "acme-staging", "acme-data"))
+
+    result = verifier.verify_gcp(
+        "local env", {"project_id": "acme-prod", "additional_projects": "discover"}
+    )
+
+    assert result["status"] == "passed"
+    assert "3 discovered projects" in result["detail"]
+
+
+def test_verify_gcp_says_so_when_discovery_could_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still passed — the tools work, on a narrower estate than was asked for."""
+    from integrations.gcp import verifier
+
+    _stub_discovery(monkeypatch, _discovered(error="HTTP 403: projects.list denied"))
+
+    result = verifier.verify_gcp(
+        "local env", {"project_id": "acme-prod", "additional_projects": "discover"}
+    )
+
+    assert result["status"] == "passed"
+    assert "1 configured project" in result["detail"]
+    assert "project discovery unavailable (HTTP 403: projects.list denied)" in result["detail"]
+
+
+def test_verify_gcp_flags_a_capped_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A capped reach is not the real reach, and nothing else tells the operator."""
+    from integrations.gcp import verifier
+    from integrations.gcp.project_discovery import MAX_DISCOVERED
+
+    _stub_discovery(monkeypatch, _discovered("acme-prod", "acme-staging", truncated=True))
+
+    result = verifier.verify_gcp(
+        "local env", {"project_id": "acme-prod", "additional_projects": "discover"}
+    )
+
+    assert f"2 discovered projects, capped at {MAX_DISCOVERED}" in result["detail"]
+
+
+def test_verify_gcp_does_not_list_projects_when_discovery_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The round trip is only owed when configuration asked for it."""
+    from integrations.gcp import verifier
+
+    called: list[object] = []
+
+    def _discover(config: Any) -> Any:
+        called.append(config)
+        raise AssertionError("discovery must not run without the token")
+
+    monkeypatch.setattr(verifier, "build_service", _build_stub_service)
+    monkeypatch.setattr(verifier, "discover", _discover)
+
+    result = verifier.verify_gcp("local env", {"project_id": "acme-prod"})
+
+    assert result["status"] == "passed"
+    assert "1 project" in result["detail"]
+    assert called == []

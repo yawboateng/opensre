@@ -18,6 +18,7 @@ from integrations.gcp.availability import gcp_available
 from integrations.gcp.client import (
     CLOUD_SQL_API,
     GCPClientError,
+    api_not_enabled,
     build_service,
     describe_api_error,
 )
@@ -187,6 +188,10 @@ def gcp_list_cloud_sql_instances(
             try:
                 response = _fetch(client, target, page_size, api_filter)
             except Exception as exc:
+                if api_not_enabled(exc):
+                    # The Admin API is off here, so the project holds no
+                    # instances — which is the answer, not a failure to get one.
+                    continue
                 report_run_error(
                     exc,
                     tool_name="gcp_list_cloud_sql_instances",

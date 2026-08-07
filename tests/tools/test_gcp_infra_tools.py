@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -450,6 +451,80 @@ def test_gke_tool_fails_when_no_project_answered(monkeypatch: pytest.MonkeyPatch
     assert result["found"] is False
     assert "acme" in result["error"]
     assert result["clusters"] == []
+
+
+class _ApiOffResponse:
+    status = 403
+
+
+class _ApiOffError(Exception):
+    """A 403 whose ``details[].reason`` says the API is off, not that access was denied."""
+
+    resp = _ApiOffResponse()
+    content = json.dumps(
+        {
+            "error": {
+                "code": 403,
+                "message": "Kubernetes Engine API has not been used in project x before",
+                "status": "PERMISSION_DENIED",
+                "details": [{"reason": "SERVICE_DISABLED", "domain": "googleapis.com"}],
+            }
+        }
+    ).encode()
+
+
+class _ApiOffClusters:
+    def __init__(self, disabled_project: str) -> None:
+        self._disabled = disabled_project
+        self._parent = ""
+
+    def list(self, parent: str) -> _ApiOffClusters:
+        self._parent = parent
+        return self
+
+    def execute(self) -> dict[str, Any]:
+        if f"projects/{self._disabled}/" in self._parent:
+            raise _ApiOffError()
+        return {"clusters": [_cluster()]}
+
+
+class _ApiOffContainerService:
+    def __init__(self, disabled_project: str) -> None:
+        self._projects = _FakeContainerProjects(_FakeLocations(_ApiOffClusters(disabled_project)))
+
+    def projects(self) -> _FakeContainerProjects:
+        return self._projects
+
+
+def test_gke_tool_says_nothing_about_a_project_with_the_api_switched_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A project with no GKE API holds no clusters, so there is no error to report.
+
+    Left as a partial_error it spends the model's context on a non-problem, and
+    on a wide project list it crowds out the projects that really did fail.
+    """
+    import integrations.gcp.tools.gcp_list_gke_clusters_tool as module
+
+    reported: list[Exception] = []
+
+    def _record(exc: Exception, **_kwargs: Any) -> None:
+        reported.append(exc)
+
+    monkeypatch.setattr(module, "report_run_error", _record)
+    _install_container(monkeypatch, _ApiOffContainerService("no-gke"))
+
+    result = gcp_list_gke_clusters(
+        project="*",
+        default_project="acme",
+        available_projects=["acme", "no-gke"],
+        project_configs={"acme": _ONE_CREDENTIAL, "no-gke": _ONE_CREDENTIAL},
+    )
+
+    assert result["cluster_count"] == 1
+    assert "partial_errors" not in result
+    # Nor is it worth an error-telemetry event on every sweep.
+    assert reported == []
 
 
 # --- audit filters -----------------------------------------------------------

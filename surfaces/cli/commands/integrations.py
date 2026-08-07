@@ -351,6 +351,12 @@ def add_gke_clusters_command(
         # against, without a second discovery run.
         click.echo(f"- skipped by --cluster: {', '.join(report.excluded)}")
 
+    if report.no_gke:
+        # Not an error — a project without the API cannot hold a cluster. Named
+        # anyway, because the way --project goes wrong is a project the operator
+        # expected clusters in that turns out to have none.
+        click.echo(f"- no Kubernetes Engine API: {', '.join(report.no_gke)}")
+
     if not report.results and not report.errors:
         click.echo(
             "No GKE clusters found in the configured projects."

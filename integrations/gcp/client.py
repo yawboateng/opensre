@@ -157,6 +157,24 @@ def build_service(config: GCPIntegrationConfig, api: tuple[str, str]) -> Any:
         ) from exc
 
 
+#: ``ErrorInfo.reason`` Google sets when the API itself is off in the project,
+#: as opposed to the caller lacking a permission on it.
+_SERVICE_DISABLED = "SERVICE_DISABLED"
+
+
+def _error_payload(exc: Exception) -> dict[str, Any]:
+    """Decode the JSON error body a ``googleapiclient`` exception carries."""
+    content = getattr(exc, "content", None)
+    if not isinstance(content, (bytes, bytearray)):
+        return {}
+    try:
+        payload = json.loads(content.decode("utf-8", "replace"))
+    except (ValueError, AttributeError):
+        return {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return error if isinstance(error, dict) else {}
+
+
 def describe_api_error(exc: Exception) -> str:
     """Render a Google API exception as one actionable line.
 
@@ -171,17 +189,33 @@ def describe_api_error(exc: Exception) -> str:
         response = getattr(exc, "resp", None)
         status = getattr(response, "status", None)
 
-    detail = ""
-    content = getattr(exc, "content", None)
-    if isinstance(content, (bytes, bytearray)):
-        try:
-            payload = json.loads(content.decode("utf-8", "replace"))
-            detail = str(payload.get("error", {}).get("message", "")).strip()
-        except (ValueError, AttributeError):
-            detail = ""
+    detail = str(_error_payload(exc).get("message", "")).strip()
 
     if status and detail:
         return f"HTTP {status}: {detail}"
     if status:
         return f"HTTP {status} from the Google API"
     return f"{type(exc).__name__} calling the Google API"
+
+
+def api_not_enabled(exc: Exception) -> bool:
+    """Whether Google refused because the API is switched off in that project.
+
+    A project that has never enabled a service cannot hold resources of that
+    kind, so when a caller sweeps many projects this means "nothing here", not a
+    failure — reporting it buries the projects that did fail, and in a tool
+    result it spends the model's context describing non-problems.
+
+    It cannot be told from a genuine denial by status code or message: both
+    arrive as HTTP 403 ``PERMISSION_DENIED`` and Google's prose for a disabled
+    API is localised. Only the machine-readable ``ErrorInfo.reason`` separates
+    them. Matching that one value keeps this fail-safe — a real
+    ``IAM_PERMISSION_DENIED``, or any reason added later, is not recognised here
+    and stays an error for the caller to report.
+    """
+    details = _error_payload(exc).get("details")
+    if not isinstance(details, list):
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("reason") == _SERVICE_DISABLED for entry in details
+    )

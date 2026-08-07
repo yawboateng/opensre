@@ -152,6 +152,23 @@ def test_an_empty_estate_says_so_rather_than_printing_nothing(
 
 
 @pytest.mark.usefixtures("_no_store")
+def test_a_project_without_the_api_is_named_but_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is not a failure — but it is the reason a project the operator named is missing."""
+    report = _report(_registered())
+    report.no_gke = ["acme-staging"]
+    recorder = _Recorder(report)
+    _set_plugin(monkeypatch, installed=True)
+    _set_register(monkeypatch, recorder)
+
+    result = CliRunner().invoke(add_gke_clusters_command, [])
+
+    assert result.exit_code == SUCCESS
+    assert "no Kubernetes Engine API: acme-staging" in result.output
+
+
+@pytest.mark.usefixtures("_no_store")
 def test_flags_reach_the_registration_call(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = _Recorder(_report(_registered()))
     _set_plugin(monkeypatch, installed=True)
