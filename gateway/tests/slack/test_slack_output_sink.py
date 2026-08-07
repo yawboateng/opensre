@@ -66,9 +66,21 @@ class _FakeMessagingClient:
         self.deletes.append({"channel": channel, "ts": ts})
         return True
 
-    def start_stream(self, *, channel: str, thread_ts: str, recipient_team_id: str) -> str | None:
+    def start_stream(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        recipient_team_id: str,
+        recipient_user_id: str,
+    ) -> str | None:
         self.stream_starts.append(
-            {"channel": channel, "thread_ts": thread_ts, "recipient_team_id": recipient_team_id}
+            {
+                "channel": channel,
+                "thread_ts": thread_ts,
+                "recipient_team_id": recipient_team_id,
+                "recipient_user_id": recipient_user_id,
+            }
         )
         return f"stream-{len(self.stream_starts)}" if self.stream_ok else None
 
@@ -90,6 +102,7 @@ def _sink(client: _FakeMessagingClient) -> SlackOutputSink:
         channel_id="C222",
         thread_ts="1700.100",
         team_id="T111",
+        user_id="U111",
         update_interval_seconds=0.0,
     )
 
