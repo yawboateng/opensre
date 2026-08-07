@@ -256,6 +256,12 @@ def _setup_incident_io() -> None:
     _run_spec_setup(INCIDENT_IO_SETUP)
 
 
+def _setup_rootly() -> None:
+    from integrations.rootly.setup import ROOTLY_SETUP
+
+    _run_spec_setup(ROOTLY_SETUP)
+
+
 def _github_browser_authorize() -> str | None:
     """Run GitHub device-flow browser authorization.
 
@@ -720,6 +726,7 @@ _HANDLERS: dict[str, Any] = {
     "honeycomb": _setup_honeycomb,
     "helm": _setup_helm,
     "incident_io": _setup_incident_io,
+    "rootly": _setup_rootly,
     "mariadb": _setup_mariadb,
     "mongodb_atlas": _setup_mongodb_atlas,
     "slack": _setup_slack,

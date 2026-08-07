@@ -44,6 +44,7 @@ class EffectiveIntegrations(StrictConfigModel):
     opsgenie: EffectiveIntegrationEntry | None = None
     pagerduty: EffectiveIntegrationEntry | None = None
     incident_io: EffectiveIntegrationEntry | None = None
+    rootly: EffectiveIntegrationEntry | None = None
     notion: EffectiveIntegrationEntry | None = None
     prefect: EffectiveIntegrationEntry | None = None
     posthog: EffectiveIntegrationEntry | None = None

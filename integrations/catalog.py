@@ -132,6 +132,7 @@ def load_env_integration_services() -> list[str]:
     add("opsgenie", _env_is_set("OPSGENIE_API_KEY"))
     add("pagerduty", _env_is_set("PAGERDUTY_API_KEY"))
     add("incident_io", _env_is_set("INCIDENT_IO_API_KEY"))
+    add("rootly", _env_is_set("ROOTLY_API_TOKEN"))
     add("jira", _all_env("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"))
     add(
         "servicenow",

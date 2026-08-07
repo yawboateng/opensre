@@ -189,6 +189,13 @@ INTEGRATION_SPECS: tuple[IntegrationSpec, ...] = (
         verify_order=22,
     ),
     IntegrationSpec(
+        service="rootly",
+        has_verifier=True,
+        direct_effective=True,
+        setup_order=53,
+        verify_order=60,
+    ),
+    IntegrationSpec(
         service="jira",
         has_verifier=True,
         direct_effective=True,

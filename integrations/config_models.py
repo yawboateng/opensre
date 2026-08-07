@@ -10,6 +10,7 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 
 from config.config import get_tracer_base_url
 from config.constants.gcp import GCP_DISCOVER_PROJECTS_TOKEN
+from config.constants.rootly import DEFAULT_ROOTLY_TIMEOUT_SECONDS
 from config.strict_config import StrictConfigModel
 from integrations._validators import (
     normalize_bearer,
@@ -31,6 +32,9 @@ DEFAULT_OPSGENIE_BASE_URLS: dict[str, str] = {
 }
 DEFAULT_INCIDENT_IO_BASE_URL = "https://api.incident.io"
 DEFAULT_PAGERDUTY_BASE_URL = "https://api.pagerduty.com"
+DEFAULT_ROOTLY_BASE_URL = "https://api.rootly.com"
+# Rootly speaks JSON:API, which rejects a plain ``application/json`` body.
+ROOTLY_JSON_API_CONTENT_TYPE = "application/vnd.api+json"
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +360,60 @@ class IncidentIoIntegrationConfig(StrictConfigModel):
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+        }
+
+
+class RootlyIntegrationConfig(StrictConfigModel):
+    """Normalized Rootly credentials used by investigation and verification flows.
+
+    ``timeout_seconds`` is settable from the environment on purpose. Jenkins
+    hardcodes its equivalent, and raising it on a slow controller now needs a
+    code change — that is the mistake this field exists to avoid.
+    """
+
+    api_token: str
+    base_url: str = DEFAULT_ROOTLY_BASE_URL
+    timeout_seconds: float = Field(default=DEFAULT_ROOTLY_TIMEOUT_SECONDS, gt=0)
+    integration_id: str = ""
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _normalize_base_url(cls, value: object) -> str:
+        normalized = normalize_url(DEFAULT_ROOTLY_BASE_URL)(value)
+        return validate_https_or_loopback_http_url(normalized, service_name="Rootly")
+
+    @field_validator("api_token", mode="before")
+    @classmethod
+    def _normalize_api_token(cls, value: object) -> str:
+        return normalize_str()(value)
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _normalize_timeout(cls, value: object) -> float:
+        """Fall back to the default rather than reject a blank or junk override.
+
+        The value arrives from an env var and a Helm chart, where "unset" is an
+        empty string. A hard failure there takes the whole integration down over
+        a formatting slip.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return DEFAULT_ROOTLY_TIMEOUT_SECONDS
+        try:
+            parsed = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return DEFAULT_ROOTLY_TIMEOUT_SECONDS
+        return parsed if parsed > 0 else DEFAULT_ROOTLY_TIMEOUT_SECONDS
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_token)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": ROOTLY_JSON_API_CONTENT_TYPE,
+            "Accept": ROOTLY_JSON_API_CONTENT_TYPE,
         }
 
 
