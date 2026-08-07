@@ -21,6 +21,7 @@ def _stream(*, update_interval_seconds: float = 10_000.0) -> tuple[_TurnStream, 
         client=client,
         channel_id="C1",
         thread_ts="t.1",
+        team_id="T1",
         update_interval_seconds=update_interval_seconds,
         on_started=lambda: None,
     )

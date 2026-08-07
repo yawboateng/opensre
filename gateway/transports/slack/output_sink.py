@@ -52,6 +52,7 @@ class SlackOutputSink:
         client: SlackMessagingClient,
         channel_id: str,
         thread_ts: str,
+        team_id: str,
         update_interval_seconds: float = 3.0,
         tool_hooks: ToolExecutionHooks | None = None,
     ) -> None:
@@ -71,6 +72,7 @@ class SlackOutputSink:
             client=client,
             channel_id=channel_id,
             thread_ts=thread_ts,
+            team_id=team_id,
             update_interval_seconds=update_interval_seconds,
             on_started=self._drop_placeholder,
         )
@@ -255,12 +257,14 @@ class _TurnStream:
         client: SlackMessagingClient,
         channel_id: str,
         thread_ts: str,
+        team_id: str,
         update_interval_seconds: float,
         on_started: Callable[[], None],
     ) -> None:
         self._client = client
         self._channel_id = channel_id
         self._thread_ts = thread_ts
+        self._team_id = team_id
         self._update_interval = update_interval_seconds
         self._on_started = on_started
         self._ts: str | None = None
@@ -347,7 +351,11 @@ class _TurnStream:
             return False
         if self._ts is not None:
             return True
-        ts = self._client.start_stream(channel=self._channel_id, thread_ts=self._thread_ts)
+        ts = self._client.start_stream(
+            channel=self._channel_id,
+            thread_ts=self._thread_ts,
+            recipient_team_id=self._team_id,
+        )
         if ts is None:
             self._dead = True
             return False

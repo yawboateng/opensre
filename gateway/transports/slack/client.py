@@ -50,8 +50,13 @@ class SlackMessagingClient(Protocol):
     def delete_message(self, *, channel: str, ts: str) -> bool:
         """Delete one of the bot's own messages; return whether it succeeded."""
 
-    def start_stream(self, *, channel: str, thread_ts: str) -> str | None:
-        """Open a streamed timeline message; return its ``ts`` or ``None``."""
+    def start_stream(self, *, channel: str, thread_ts: str, recipient_team_id: str) -> str | None:
+        """Open a streamed timeline message; return its ``ts`` or ``None``.
+
+        ``recipient_team_id`` is the workspace the stream is delivered to. An
+        org-wide install spans several, so Slack cannot infer it and rejects
+        the call with ``missing_recipient_team_id`` when it is absent.
+        """
 
     def append_stream(self, *, channel: str, ts: str, chunks: Blocks) -> bool:
         """Append markdown/task chunks to a streamed message."""
@@ -175,7 +180,7 @@ class SlackWebApiClient:
             return False
         return True
 
-    def start_stream(self, *, channel: str, thread_ts: str) -> str | None:
+    def start_stream(self, *, channel: str, thread_ts: str, recipient_team_id: str) -> str | None:
         # Streaming is documented under Slack's AI-apps surface; whether it
         # works without the Agents feature toggle is workspace/app-dependent,
         # so the first failure with a permanent-looking error disables it for
@@ -187,6 +192,11 @@ class SlackWebApiClient:
                 channel=channel,
                 thread_ts=thread_ts,
                 task_display_mode="timeline",
+                # Omitted, Slack answers ``missing_recipient_team_id`` on an
+                # org-wide install rather than inferring the workspace. Sent
+                # unconditionally: it is the team the turn arrived from either
+                # way, so a single-workspace install is unaffected.
+                recipient_team_id=recipient_team_id,
             )
         except SlackApiError as exc:
             error = str(exc.response.get("error") or "")
