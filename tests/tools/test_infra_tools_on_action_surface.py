@@ -71,7 +71,13 @@ def test_action_surface_infra_tools_are_exactly_the_curated_set():
     assert actual_infra_tools == EXPECTED_INFRA_TOOLS_ON_ACTION
 
 
-@pytest.mark.parametrize("tool_name", EXCLUDED_INFRA_TOOLS)
+# The sets above are the right structure for the membership and equality
+# assertions, but a set is the wrong thing to hand to parametrize: xdist runs
+# each worker in its own process with its own PYTHONHASHSEED, so the workers
+# derive different test ids from the same set and the run aborts with
+# "Different tests were collected between gw0 and gw1" before anything executes.
+# Sorting fixes the iteration order without changing the assertions.
+@pytest.mark.parametrize("tool_name", sorted(EXCLUDED_INFRA_TOOLS))
 def test_sensitive_infra_tools_are_not_on_the_action_surface(tool_name):
     """Test that sensitive tools are excluded from action but still on investigation."""
     # Tool should be absent from action surface
@@ -85,7 +91,7 @@ def test_sensitive_infra_tools_are_not_on_the_action_surface(tool_name):
     assert tool_name in investigation_tool_names
 
 
-@pytest.mark.parametrize("tool_name", K8S_TOOLS_WITH_CLUSTER_PARAM)
+@pytest.mark.parametrize("tool_name", sorted(K8S_TOOLS_WITH_CLUSTER_PARAM))
 def test_cluster_credentials_stay_model_protected_on_action_tools(tool_name):
     """Test that kubernetes tools with cluster params have credential protection."""
     tool_map = get_registered_tool_map()
