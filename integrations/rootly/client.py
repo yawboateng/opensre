@@ -27,6 +27,13 @@ import httpx
 
 from integrations.config_models import RootlyIntegrationConfig
 from integrations.probes import ProbeResult
+from integrations.rootly.alerts import (
+    ALERT_GET_UNENTITLED_STATUSES,
+    ALERTS_PATH,
+    ALERTS_UNENTITLED_STATUSES,
+    alerts_entitlement_error,
+    shape_alert,
+)
 from integrations.rootly.jsonapi import (
     attributes,
     clamp,
@@ -447,6 +454,103 @@ class RootlyClient:
             "total": total if total is not None else len(policies),
             "truncated": bool(total is not None and total > len(policies)),
         }
+
+    def _alerts_error(
+        self,
+        method: str,
+        exc: Exception,
+        *,
+        unentitled: frozenset[HTTPStatus],
+    ) -> dict[str, Any]:
+        """Degrade an Alerts entitlement gap instead of reporting a failure.
+
+        ``capture_service_error`` classifies 403 as ``severity="error"``, so an
+        account without Rootly Alerts would file one Sentry error per turn,
+        forever. The statuses that mean "you do not have this product" bypass
+        it; everything else — including 401, which means re-run setup rather
+        than buy something — takes the normal path with telemetry.
+
+        ``unentitled`` differs per action: see ``ALERT_GET_UNENTITLED_STATUSES``.
+        """
+        if isinstance(exc, httpx.HTTPStatusError):
+            # Raw int, not HTTPStatus(...): Cloudflare fronts Rootly and emits
+            # 520/521/524, which are not in the enum and would raise here.
+            status = int(exc.response.status_code)
+            if status in unentitled:
+                logger.info(
+                    "[rootly] Alerts access denied (HTTP %s) - account may lack the Alerts product",
+                    status,
+                )
+                return {
+                    "success": False,
+                    "entitled": False,
+                    "error": alerts_entitlement_error(status),
+                }
+        return self._error(method, exc)
+
+    def list_alerts(
+        self,
+        *,
+        status: str = "",
+        source: str = "",
+        service: str = "",
+        environment: str = "",
+        started_after: str = "",
+        page_size: int | None = _DEFAULT_PAGE_SIZE,
+    ) -> dict[str, Any]:
+        """List alerts newest-first, optionally filtered.
+
+        Unlike ``/v1/oncalls``, this endpoint does page server-side, so
+        ``total`` is Rootly's own count rather than the length of the slice.
+        """
+        size = clamp(page_size, _DEFAULT_PAGE_SIZE, _MAX_PAGE_SIZE)
+        params: dict[str, Any] = {"page[size]": size, "sort": "-created_at"}
+        if status:
+            params["filter[status]"] = status
+        if source:
+            params["filter[source]"] = source
+        if service:
+            params["filter[services]"] = service
+        if environment:
+            params["filter[environments]"] = environment
+        if started_after:
+            params["filter[started_at][gte]"] = started_after
+
+        try:
+            payload = self._get(ALERTS_PATH, params)
+        except Exception as exc:
+            return self._alerts_error("list_alerts", exc, unentitled=ALERTS_UNENTITLED_STATUSES)
+
+        alerts = [shape_alert(item) for item in data_list(payload)]
+        total = meta_total(payload)
+        return {
+            "success": True,
+            "alerts": alerts,
+            "returned": len(alerts),
+            "total": total if total is not None else len(alerts),
+            "truncated": bool(total is not None and total > len(alerts)),
+        }
+
+    def get_alert(self, alert_id: str) -> dict[str, Any]:
+        """Fetch one alert in full, including its shaped responders."""
+        try:
+            payload = self._get(f"{ALERTS_PATH}/{alert_id}", {})
+        except httpx.HTTPStatusError as exc:
+            # A 404 here is a wrong id far more often than a missing product,
+            # so it neither degrades to an entitlement message (which would
+            # send someone to buy what they already own) nor files telemetry:
+            # capture_service_error rates 404 as severity="error", and models
+            # guess ids, so that would be one Sentry error per bad guess.
+            if int(exc.response.status_code) == HTTPStatus.NOT_FOUND:
+                return {"success": False, "error": f"Rootly has no alert with id {alert_id}."}
+            return self._alerts_error("get_alert", exc, unentitled=ALERT_GET_UNENTITLED_STATUSES)
+        except Exception as exc:
+            return self._alerts_error("get_alert", exc, unentitled=ALERT_GET_UNENTITLED_STATUSES)
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return {"success": False, "error": f"Rootly returned no alert for id {alert_id}."}
+        return {"success": True, "alert": shape_alert(data, full=True)}
 
 
 def make_rootly_client(

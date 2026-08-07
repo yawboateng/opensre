@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from integrations.rootly.tools.alerts import rootly_alerts
 from integrations.rootly.tools.incidents import _extract_params as extract_incident_params
 from integrations.rootly.tools.incidents import rootly_incidents
 from integrations.rootly.tools.on_call import rootly_on_call
@@ -12,7 +13,13 @@ from integrations.rootly.tools.timeline import rootly_post_timeline_event
 from integrations.rootly.tools.timeline_approval import TIMELINE_EVENT_APPROVAL_DISPLAY
 from tools.registry import get_registered_tools
 
-_ROOTLY_TOOLS = {"rootly_incidents", "rootly_on_call", "rootly_post_timeline_event"}
+_ROOTLY_TOOLS = {
+    "rootly_alerts",
+    "rootly_incidents",
+    "rootly_on_call",
+    "rootly_post_timeline_event",
+}
+_READ_ONLY_ROOTLY_TOOLS = _ROOTLY_TOOLS - {"rootly_post_timeline_event"}
 
 
 def _client() -> MagicMock:
@@ -45,6 +52,21 @@ def test_the_write_tool_is_approval_gated() -> None:
     assert write.requires_approval is True
     assert write.side_effect_level == "mutating"
     assert write.approval_display is not None
+
+
+@pytest.mark.parametrize("name", sorted(_READ_ONLY_ROOTLY_TOOLS))
+def test_the_read_tools_cannot_mutate_rootly(name: str) -> None:
+    """Only the timeline write may carry a side effect.
+
+    ``rootly_alerts`` is the one most likely to grow one: acknowledging or
+    resolving is defensible behind approval, but paging is not, and both are
+    deliberately absent. A tool that gains a write path silently would reach a
+    live pager.
+    """
+    registered = {tool.name: tool for tool in get_registered_tools("action")}
+
+    assert registered[name].requires_approval is False
+    assert registered[name].side_effect_level != "mutating"
 
 
 @pytest.mark.parametrize("name", sorted(_ROOTLY_TOOLS))
@@ -124,6 +146,32 @@ def test_client_failure_is_reported_as_unavailable(monkeypatch: pytest.MonkeyPat
 
     assert result["available"] is False
     assert result["incidents"] == []
+
+
+def test_alerts_get_without_an_alert_id_never_calls_rootly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client()
+    _patch_client(monkeypatch, "alerts", client)
+
+    result = rootly_alerts(action="get", rootly_token="secret")
+
+    assert result["available"] is False
+    assert "alert_id" in result["error"]
+    client.get_alert.assert_not_called()
+
+
+def test_unknown_alerts_action_degrades_to_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hallucinated write action must read, not silently no-op."""
+    client = _client()
+    client.list_alerts.return_value = {"success": True, "alerts": []}
+    _patch_client(monkeypatch, "alerts", client)
+
+    result = rootly_alerts(action="acknowledge", rootly_token="secret")
+
+    assert result["action"] == "list"
+    client.list_alerts.assert_called_once()
+    client.get_alert.assert_not_called()
 
 
 def test_timeline_write_normalizes_visibility(monkeypatch: pytest.MonkeyPatch) -> None:

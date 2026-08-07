@@ -4,9 +4,8 @@ Rootly On-Call is a separate product from Rootly Incidents. This module handles
 the On-Call API paths, response shaping, and entitlement degradation when an
 account lacks the On-Call product.
 
-PII allowlist: person records expose only id, name (composed from first/last
-names when full_name is null), name_with_team, and time_zone. Email addresses,
-phone numbers, created_at, and updated_at are structurally dropped — never
+Person records go through the shared PII allowlist in ``people.py`` — email
+addresses, phone numbers, and timestamps are structurally dropped, never
 emitted as keys, regardless of what Rootly includes.
 """
 
@@ -16,6 +15,7 @@ from http import HTTPStatus
 from typing import Any
 
 from integrations.rootly.jsonapi import attributes, named
+from integrations.rootly.people import shape_person
 
 # API paths
 ON_CALL_PATH = "/v1/oncalls"
@@ -59,27 +59,6 @@ def index_included_users(payload: Any) -> dict[str, dict[str, Any]]:
             continue
         users[user_id] = attributes(record)
     return users
-
-
-def shape_person(user_id: int, attrs: dict[str, Any]) -> dict[str, Any]:
-    """Shape one person from User attributes, applying the PII allowlist.
-
-    Only id, name, name_with_team, and time_zone are emitted. Email, phone,
-    created_at, updated_at are structurally dropped.
-    """
-    # Compose name from first/last when full_name is missing
-    full_name = attrs.get("full_name")
-    if not full_name:
-        first = attrs.get("first_name", "")
-        last = attrs.get("last_name", "")
-        full_name = f"{first} {last}".strip() or "Unknown"
-
-    return {
-        "id": str(user_id),
-        "name": full_name,
-        "name_with_team": attrs.get("full_name_with_team", ""),
-        "time_zone": attrs.get("time_zone", ""),
-    }
 
 
 def shape_on_call(record: Any, users: dict[str, dict[str, Any]]) -> dict[str, Any]:

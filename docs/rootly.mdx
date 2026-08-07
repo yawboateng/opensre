@@ -1,17 +1,18 @@
 ---
 title: "Rootly"
-description: "Connect Rootly so OpenSRE can read incident context, look up who is on call, and record findings on the incident timeline"
+description: "Connect Rootly so OpenSRE can read alerts and incident context, look up who is on call, and record findings on the incident timeline"
 ---
 
-OpenSRE can read Rootly incidents during an investigation, look up who is currently on call, and — with your approval — append findings to an incident's timeline, so the RCA lands on the incident the retrospective will actually read.
+OpenSRE can read Rootly alerts and incidents during an investigation, look up who is currently on call, and — with your approval — append findings to an incident's timeline, so the RCA lands on the incident the retrospective will actually read.
 
-These tools are available in chat as well as during an investigation, so you can ask about an incident or check on-call coverage from Slack, Discord, or Telegram.
+These tools are available in chat as well as during an investigation, so you can ask what is firing, ask about an incident, or check on-call coverage from Slack, Discord, or Telegram.
 
 ## Prerequisites
 
 - A Rootly account
 - A Rootly API key with read access to incidents and incident events
 - Write access on incident events if you want OpenSRE to post timeline notes
+- Optional: a key whose user can read alerts, if you want to ask what is currently firing
 - Optional: a key whose user can read on-call schedules and escalation policies, if you want who-is-on-call lookups
 
 ## Setup
@@ -41,6 +42,31 @@ opensre integrations verify rootly
 ```
 
 Verification performs a minimal `GET /v1/incidents` request.
+
+## Reading alerts
+
+Most of the time nothing has been declared yet — there is an alert firing. `rootly_alerts` covers that window. It is read-only and takes an `action`:
+
+| Action | What it returns |
+| --- | --- |
+| `list` | Recent alerts, newest first. Filter with `status`, `alert_source`, `service`, `environment`, or `started_after` |
+| `get` | One alert in full: labels, routing, responders, and which services and groups it reached |
+
+`status` accepts `triggered`, `open`, `acknowledged`, `resolved`, or `deferred`. Ask for `triggered` or `open` to see what is firing right now.
+
+`get` needs an `alert_id` from a `list` result.
+
+<Note>
+OpenSRE can only read alerts. It cannot acknowledge, resolve, or snooze one, and it cannot page anyone — not even with your approval. Paging is a decision that wakes a person up, and an approval click does not make a mis-page at 3am recoverable.
+</Note>
+
+<Warning>
+An alert carries a raw payload from whatever raised it — a Datadog webhook body, a Grafana annotation, your own integration's JSON. OpenSRE returns the **names** of the fields in that payload but never their values, because it has no way to know whether a field holds a metric or a database password. If you need the values, open the alert's `url` in Rootly.
+</Warning>
+
+An alert's responders come back as name, team, and time zone only — the same rule as [who is on call](#who-is-on-call). If your account or API key cannot see alerts at all, this tool says so and the incident tools keep working.
+
+Listings are capped at 50 alerts per call and set `truncated` when Rootly holds more.
 
 ## Reading incidents
 
