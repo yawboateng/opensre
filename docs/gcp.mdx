@@ -358,6 +358,8 @@ GCP_AUTO_REGISTER_GKE=acme-prod       # but only register clusters in one projec
 
 Registration runs in the background, so a slow GKE control plane cannot hold up startup or fail a readiness probe. For a few seconds after boot the clusters are not registered yet; a request arriving in that window sees the `kubernetes_*` tools as unavailable.
 
+Each cluster is probed before it is registered, and an unreachable one is skipped after five seconds rather than holding up the clusters behind it. Discovering far more clusters than get registered usually means the control planes restrict access by source address — see [when a cluster is discovered but not registered](/kubernetes#when-a-cluster-is-discovered-but-not-registered).
+
 The same background thread repeats the pass every 30 minutes, so a cluster built after boot registers itself — see [Staying current](#staying-current).
 
 <Warning>

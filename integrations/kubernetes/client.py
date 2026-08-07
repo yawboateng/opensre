@@ -31,6 +31,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TAIL_LINES = 100
 _DEFAULT_LIMIT = 50
 
+# Bounds on every request the SDK issues. A control plane that does not
+# authorize this host — GKE master-authorized-networks, a closed security
+# group, a down VPN — drops the packets rather than refusing the connection, so
+# an unbounded connect only ends when the OS gives up, minutes later. Clusters
+# are probed one at a time during registration, so one unreachable control
+# plane otherwise stalls every cluster queued behind it.
+_CONNECT_TIMEOUT_SECONDS = 5.0
+_READ_TIMEOUT_SECONDS = 60.0
+_REQUEST_TIMEOUT: tuple[float, float] = (_CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_SECONDS)
+
 # Resource types that carry env vars and require value redaction before returning to the LLM.
 _WORKLOAD_TYPES: frozenset[str] = frozenset(
     {
@@ -114,6 +124,21 @@ def _redact_env_values(resource_dict: dict[str, Any]) -> None:
         _strip_env(template_spec)
 
 
+class _BoundedApiClient(k8s_client.ApiClient):
+    """``ApiClient`` that applies :data:`_REQUEST_TIMEOUT` to every request.
+
+    The SDK has no client-wide timeout setting: each generated method carries
+    its own ``_request_timeout`` and defaults it to ``None``. Overriding the
+    single funnel every one of them routes through bounds the whole integration
+    in one place. A caller that passes its own timeout still wins.
+    """
+
+    def call_api(self, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("_request_timeout") is None:
+            kwargs["_request_timeout"] = _REQUEST_TIMEOUT
+        return super().call_api(*args, **kwargs)
+
+
 class KubernetesClient:
     """Kubernetes API client built from a kubeconfig file path or inline YAML."""
 
@@ -149,7 +174,7 @@ class KubernetesClient:
                 client_configuration=api_config,
                 context=context,
             )
-        api_client = k8s_client.ApiClient(api_config)
+        api_client = _BoundedApiClient(api_config)
         self._api_client = api_client
         return (
             k8s_client.CoreV1Api(api_client),

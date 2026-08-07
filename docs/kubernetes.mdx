@@ -155,6 +155,30 @@ default, and it stands down entirely when `KUBERNETES_INSTANCES` is set, because
 the store overrides the environment for the whole integration and would
 otherwise shadow the clusters you declared there.
 
+### When a cluster is discovered but not registered
+
+Every cluster is probed before it is stored, so one that answers nothing is
+skipped rather than registered broken. The common cause is network, not
+credentials: a control plane that restricts access by source address — GKE
+master authorized networks, an AWS security group, a VPN — silently drops
+packets from anywhere else, and the probe records a connect timeout after five
+seconds.
+
+Compare the two sides before touching IAM:
+
+```bash
+# What the agent's host looks like from outside — the address to allow.
+curl -s https://api.ipify.org
+
+# What the cluster currently allows.
+gcloud container clusters describe <cluster> --project <project> --location <location> \
+  --format='value(masterAuthorizedNetworksConfig.cidrBlocks)'
+```
+
+Running in a container behind Cloud NAT or a NAT gateway, that address belongs
+to the NAT, not the pod, and it can change unless the NAT holds a reserved
+static IP. Reserve one before you allow-list it.
+
 ### Finding GKE clusters you have not registered
 
 `kubernetes_list_clusters` only knows about clusters someone registered here.
