@@ -4,6 +4,7 @@ from __future__ import annotations
 
 TOOL_MODULES = (
     "incidents",
+    "on_call",
     "timeline",
 )
 

@@ -1608,6 +1608,7 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         # capture_service_error and returns structured error dicts; any unexpected
         # exception from run() escapes to the #1476 global wrapper.
         "rootly_incidents",
+        "rootly_on_call",
         "rootly_post_timeline_event",
         "run_investigation",
         "scan_redis_keys",
