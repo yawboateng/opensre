@@ -1607,6 +1607,7 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         # Rootly tools: the client catches exceptions internally via
         # capture_service_error and returns structured error dicts; any unexpected
         # exception from run() escapes to the #1476 global wrapper.
+        "rootly_alerts",
         "rootly_incidents",
         "rootly_on_call",
         "rootly_post_timeline_event",

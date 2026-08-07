@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 TOOL_MODULES = (
+    "alerts",
     "incidents",
     "on_call",
     "timeline",
