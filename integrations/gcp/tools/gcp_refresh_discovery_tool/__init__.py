@@ -57,7 +57,9 @@ _SCOPE_ANTI_EXAMPLE = (
 _DESCRIPTION = (
     "Re-read which Google Cloud projects and GKE clusters this deployment can reach, "
     "without waiting for the periodic refresh. Use when a project or cluster was "
-    "created or granted access just now."
+    "created or granted access just now. WARNING: This operation is slow (can take "
+    "~105 seconds) and runs synchronously during your chat turn. Only use when "
+    "absolutely necessary."
 )
 
 
@@ -126,6 +128,7 @@ def _refresh_gke() -> dict[str, Any]:
         "gcp_list_projects reported a discovery error that has since been fixed",
     ],
     anti_examples=[_ORDER_ANTI_EXAMPLE, _SCOPE_ANTI_EXAMPLE],
+    surfaces=("investigation", "action"),
     requires=[],
     input_schema={"type": "object", "properties": {}, "required": []},
     is_available=gcp_available,

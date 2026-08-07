@@ -176,7 +176,7 @@ class KubernetesListPodsTool(BaseTool):
         "Filtering pods by label selector to scope investigation",
         "Verifying that a deployment's pods are running after a rollout",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = ["kubeconfig"]
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
@@ -271,7 +271,7 @@ class KubernetesGetPodLogsTool(BaseTool):
         "Do not use for CloudWatch or Datadog log search — wrong backend.",
         "Do not use to exec into a pod or mutate cluster state.",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = ["pod_name"]
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
@@ -375,7 +375,7 @@ class KubernetesListDeploymentsTool(BaseTool):
         "Verifying deployment replica health across a namespace",
         "Identifying deployments stuck in a partial-rollout state",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = []
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
@@ -461,7 +461,7 @@ class KubernetesGetEventsTool(BaseTool):
         "Understanding scheduling failures (Insufficient CPU/Memory)",
         "Correlating event timestamps with incident timeline",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = []
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
@@ -566,7 +566,7 @@ class KubernetesDescribePodTool(BaseTool):
         + "kubernetes_get_resource)",
         "Listing many pods at once (use kubernetes_list_pods)",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = ["pod_name"]
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
@@ -644,7 +644,7 @@ class KubernetesListNodesTool(BaseTool):
         "Identifying nodes with taints that prevent pod scheduling",
         "Correlating pod scheduling failures with node capacity",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = []
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "cluster_configs"]
     input_schema = {
@@ -736,7 +736,7 @@ class KubernetesListServicesTool(BaseTool):
         "Diagnosing port mismatches between services and pods",
         "Finding services exposed via NodePort for debugging",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = []
     injected_params = ["kubeconfig", "kubeconfig_path", "context", "namespace", "cluster_configs"]
     input_schema = {
@@ -1278,7 +1278,7 @@ class KubernetesListClustersTool(BaseTool):
         "Choosing the right cluster to target when several are registered",
         "Confirming a named cluster exists before calling other kubernetes_* tools",
     ]
-    surfaces = ("investigation", "chat")
+    surfaces = ("investigation", "chat", "action")
     requires = []
     injected_params = ["clusters"]
     input_schema = {

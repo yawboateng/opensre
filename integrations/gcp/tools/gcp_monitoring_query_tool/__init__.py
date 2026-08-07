@@ -77,6 +77,7 @@ _ANTI_EXAMPLES = (
         "Confirming whether a metric changed before or after a deployment",
     ],
     anti_examples=list(_ANTI_EXAMPLES),
+    surfaces=("investigation", "action"),
     requires=[],
     input_schema={
         "type": "object",

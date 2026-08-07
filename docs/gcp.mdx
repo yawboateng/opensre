@@ -1,6 +1,6 @@
 ---
 title: "Google Cloud"
-description: "Connect Google Cloud so OpenSRE can read logs, metrics, audit trails, GKE clusters, VMs, Cloud Run, Cloud SQL, Pub/Sub and Error Reporting during investigations, across one or many projects"
+description: "Connect Google Cloud so OpenSRE can read logs, metrics, audit trails, GKE clusters, VMs, Cloud Run, Cloud SQL, Pub/Sub and Error Reporting during investigations and chat sessions, across one or many projects"
 ---
 
 OpenSRE reads Cloud Logging entries, Cloud Monitoring time series, Cloud Audit Logs, GKE clusters, Compute Engine VMs, Cloud Run services, Cloud SQL instances, Pub/Sub backlogs and Error Reporting groups from your Google Cloud projects — including GKE container logs and cluster metrics when no kubeconfig is registered.
@@ -139,7 +139,9 @@ A project must be in scope via `GCP_PROJECT_ID`, `GCP_ADDITIONAL_PROJECTS`, or `
 Do not write `GCP_ADDITIONAL_PROJECTS="*"` expecting a wildcard. `*` is what the *agent* passes to mean "every project already in scope"; as a config value it is read as a project id, and one invalid id fails an entire Cloud Logging request — taking your real projects' logs with it. Use `discover`.
 </Warning>
 
-## Investigation tools
+## Tools
+
+Five tools are available on both investigation and chat/Slack surfaces: `gcp_list_projects`, `gcp_list_gke_clusters`, `gcp_monitoring_query`, `gcp_error_reporting_top_errors`, and `gcp_refresh_discovery`. The remaining tools are investigation-only.
 
 ### `gcp_logging_query`
 
@@ -290,6 +292,8 @@ Re-reads the project listing and re-runs GKE registration immediately, instead o
 
 It **grants nothing**. Both halves redo work the deployment already does on a timer, with the scope it already has: `GCP_ADDITIONAL_PROJECTS` still decides which discovered projects become queryable, and the GKE half does nothing unless `GCP_AUTO_REGISTER_GKE` is set. Widening either variable and then calling this changes nothing — the process reads its environment once, at start.
 
+It is also the slowest tool here. Both halves run before the agent replies, and on an estate of a dozen projects that is a minute or two of silence — enough to consume most of a chat turn. Worth it when you know something changed on the Google side; not worth it as a speculative first step.
+
 ## Registering your GKE clusters automatically
 
 Anything `gcp_list_gke_clusters` reports under `unregistered_clusters` is visible but unreachable — the `kubernetes_*` tools cannot run against it. One command fixes every one of them:
@@ -333,7 +337,7 @@ Clusters with a **private endpoint only** are reachable from inside their VPC. R
 
 ## Registering at startup (containers)
 
-`add-gke-clusters` writes to the local store, which lives in the container filesystem. In a pod that store is gone at the next restart and invisible to a second replica, so a cluster you register by hand has to be re-registered after every rollout — and nothing tells you it lapsed until an investigation needs a `kubernetes_*` tool.
+`add-gke-clusters` writes to the local store, which lives in the container filesystem. In a pod that store is gone at the next restart and invisible to a second replica, so a cluster you register by hand has to be re-registered after every rollout — and nothing tells you it lapsed until an investigation or chat message needs a `kubernetes_*` tool.
 
 Set `GCP_AUTO_REGISTER_GKE` and each process registers the clusters itself as it starts:
 
@@ -349,7 +353,7 @@ Reach for `project/cluster` when a project holds one cluster worth investigating
 
 Clusters that were found and then filtered out are listed in the startup log, so a mistyped name shows up as a name you can compare against rather than as nothing happening.
 
-It is off unless you set it, on purpose. The `kubernetes_*` tools are read-only — none of them can restart a deployment or delete a pod, and Secrets cannot be fetched — but read-only is not the same as harmless: `kubernetes_get_pod_logs` and `kubernetes_list_configmaps` routinely surface credentials and personal data, and whatever they return ends up in LLM context and in investigation reports. Widening that should be a decision you made rather than something a boot sequence did for you. `true` covers exactly the projects in scope via `GCP_PROJECT_ID` / `GCP_ADDITIONAL_PROJECTS` / `GCP_INSTANCES` — no more.
+It is off unless you set it, on purpose. The `kubernetes_*` tools are read-only — none of them can restart a deployment or delete a pod, and Secrets cannot be fetched — but read-only is not the same as harmless: `kubernetes_get_pod_logs` routinely surfaces credentials and personal data, and whatever it returns ends up in LLM context and in investigation reports and Slack messages. `kubernetes_list_configmaps` and `kubernetes_get_resource` were deliberately held back from chat/Slack for exactly this reason — they can expose ConfigMap contents that should have been Secrets. Widening cluster access should be a decision you made rather than something a boot sequence did for you. `true` covers exactly the projects in scope via `GCP_PROJECT_ID` / `GCP_ADDITIONAL_PROJECTS` / `GCP_INSTANCES` — no more.
 
 That bound is only as narrow as those variables, so the one combination to think twice about is `GCP_ADDITIONAL_PROJECTS=discover` with `GCP_AUTO_REGISTER_GKE=true`: together they do mean "register every cluster in every project this credential can see", including projects created later. If you want org-wide *log* access without org-wide *cluster* access, name the projects here instead of using `true`:
 
@@ -392,7 +396,7 @@ Two things behave differently to how a timer usually reads:
 
 Neither interval affects **which** projects become queryable, only how often the question is asked. `GCP_ADDITIONAL_PROJECTS` still decides that, and changing it needs a restart.
 
-Not willing to wait for the interval? The agent can call `gcp_refresh_discovery` to do both halves now — say "re-check which projects you can see" and it will.
+Not willing to wait for the interval? The agent can call `gcp_refresh_discovery` to do both halves now — say "re-check which projects you can see" and it will. Expect it to take a minute or two on a large estate; see [`gcp_refresh_discovery`](#gcp-refresh-discovery).
 
 ## Verify
 
