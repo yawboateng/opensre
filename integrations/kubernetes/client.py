@@ -1378,6 +1378,7 @@ class KubernetesClient:
         Returns:
             Dict with success, workloads list, total, truncated status, and unavailable kinds
         """
+
         @dataclass(frozen=True, slots=True)
         class _KindPage:
             rows: tuple[dict[str, Any], ...]
@@ -1636,14 +1637,16 @@ class KubernetesClient:
                         for c in (status.container_statuses or [])
                     ]
 
-                    pods.append({
-                        "kind": "Pod",
-                        "name": meta.name,
-                        "namespace": meta.namespace,
-                        "ready": sum(1 for c in containers if c["ready"]),
-                        "desired": len(containers),
-                        "phase": status.phase,
-                    })
+                    pods.append(
+                        {
+                            "kind": "Pod",
+                            "name": meta.name,
+                            "namespace": meta.namespace,
+                            "ready": sum(1 for c in containers if c["ready"]),
+                            "desired": len(containers),
+                            "phase": status.phase,
+                        }
+                    )
 
             # Sort by (namespace, name)
             pods.sort(key=lambda pod: (pod["namespace"] or "", pod["name"] or ""))

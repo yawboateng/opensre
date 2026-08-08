@@ -10,13 +10,10 @@ from typing import Any
 
 from core.tool_framework.base import BaseTool
 from core.tool_framework.utils.tool_availability import tool_unavailable
-
 from integrations.kubernetes.tools import (
-    _base_params,
-    _is_available,
-    _resolve_client,
     _CLUSTER_PROP,
     _UNAVAILABLE_MSG,
+    _is_available,
 )
 
 #: One task per cluster, not per API call: the five kind calls inside a cluster
@@ -44,8 +41,6 @@ def _search_one_cluster(
 
     Returns a dict with matches, clusters_searched, clusters_failed, and pods_searched.
     """
-    from integrations.kubernetes.client import KubernetesClient
-
     try:
         # Build client for this cluster
         cfg_dict = {"kubernetes": cluster_conn}
@@ -68,7 +63,10 @@ def _search_one_cluster(
                 "matches": [],
                 "clusters_searched": [],
                 "clusters_failed": [
-                    {"cluster": cluster_name, "reason": workload_result.get("error", "unknown error")}
+                    {
+                        "cluster": cluster_name,
+                        "reason": workload_result.get("error", "unknown error"),
+                    }
                 ],
                 "pods_searched": False,
                 "unavailable_kinds": [],
@@ -82,11 +80,13 @@ def _search_one_cluster(
             match["cluster"] = cluster_name
 
         for kind_info in workload_result.get("unavailable_kinds", []):
-            unavailable_kinds.append({
-                "cluster": cluster_name,
-                "kind": kind_info["kind"],
-                "reason": kind_info["reason"],
-            })
+            unavailable_kinds.append(
+                {
+                    "cluster": cluster_name,
+                    "kind": kind_info["kind"],
+                    "reason": kind_info["reason"],
+                }
+            )
 
         # Phase 2: Search pods if no workload matches and include_pods is True OR explicit
         pods_searched = False
@@ -152,7 +152,11 @@ class KubernetesSearchFleetTool(BaseTool):
     surfaces = ("investigation", "chat", "action")
     requires = []
     injected_params = [
-        "kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs",
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
     ]
     input_schema = {
         "type": "object",
@@ -186,15 +190,19 @@ class KubernetesSearchFleetTool(BaseTool):
             },
             # kubeconfig / kubeconfig_path / context are injected and pruned from
             # the model-facing schema; declare them for parity with the other tools.
-            **{k: v for k, v in {
+            **{
                 "kubeconfig": {"type": "string", "description": "Raw kubeconfig YAML string"},
                 "kubeconfig_path": {
                     "type": "string",
                     "default": "",
                     "description": "Path to kubeconfig file (alternative to kubeconfig)",
                 },
-                "context": {"type": "string", "default": "", "description": "Kubeconfig context to use"},
-            }.items()},
+                "context": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Kubeconfig context to use",
+                },
+            },
         },
         "required": ["name_contains"],
     }
@@ -219,7 +227,9 @@ class KubernetesSearchFleetTool(BaseTool):
         cluster_configs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Search for workloads across the fleet."""
-        if not _is_available({"kubernetes": {"kubeconfig": kubeconfig, "kubeconfig_path": kubeconfig_path}}):
+        if not _is_available(
+            {"kubernetes": {"kubeconfig": kubeconfig, "kubeconfig_path": kubeconfig_path}}
+        ):
             return tool_unavailable("kubernetes", _UNAVAILABLE_MSG)
 
         # Deliberately NOT passed through _effective_namespace. That helper
@@ -244,7 +254,9 @@ class KubernetesSearchFleetTool(BaseTool):
             selected_clusters = {cluster: configs.get(cluster)}
             if selected_clusters[cluster] is None:
                 available = sorted(configs)
-                return tool_unavailable("kubernetes", f"unknown cluster '{cluster}'; available clusters: {available}")
+                return tool_unavailable(
+                    "kubernetes", f"unknown cluster '{cluster}'; available clusters: {available}"
+                )
         else:
             # All clusters
             if configs:
@@ -257,7 +269,10 @@ class KubernetesSearchFleetTool(BaseTool):
         for cluster_name, cluster_conn in selected_clusters.items():
             if cluster_conn is None:
                 available = sorted(configs)
-                return tool_unavailable("kubernetes", f"unknown cluster '{cluster_name}'; available clusters: {available}")
+                return tool_unavailable(
+                    "kubernetes",
+                    f"unknown cluster '{cluster_name}'; available clusters: {available}",
+                )
 
         # Fan out across selected clusters with deadline
         deadline = time.monotonic() + _FLEET_SEARCH_DEADLINE_SECONDS
@@ -270,17 +285,22 @@ class KubernetesSearchFleetTool(BaseTool):
         pods_searched = False
 
         with ThreadPoolExecutor(max_workers=_MAX_PARALLEL_CLUSTERS) as pool:
-            futures = {
-                pool.submit(
-                    ctx.run,
+            def _submit_cluster_search(
+                cname: str, cconn: dict[str, Any]
+            ) -> dict[str, Any]:
+                return ctx.run(
                     _search_one_cluster,
-                    cluster_name,
-                    cluster_conn,
+                    cname,
+                    cconn,
                     name_contains,
                     search_namespace,
-                    include_pods
-                ): cluster_name
+                    include_pods,
+                )
+
+            futures = {
+                pool.submit(_submit_cluster_search, cluster_name, cluster_conn): cluster_name
                 for cluster_name, cluster_conn in selected_clusters.items()
+                if cluster_conn is not None  # Should never be None after validation above
             }
 
             done, pending = concurrent.futures.wait(
@@ -304,7 +324,9 @@ class KubernetesSearchFleetTool(BaseTool):
             # Handle timed-out futures
             for future in pending:
                 cluster_name = futures[future]
-                clusters_failed.append({"cluster": cluster_name, "reason": "search deadline exceeded"})
+                clusters_failed.append(
+                    {"cluster": cluster_name, "reason": "search deadline exceeded"}
+                )
 
             # Deliberately leak threads: shutdown(wait=False, cancel_futures=True)
             # cannot interrupt a thread already inside a socket read; those threads
@@ -313,19 +335,24 @@ class KubernetesSearchFleetTool(BaseTool):
             pool.shutdown(wait=False, cancel_futures=True)
 
         # Sort matches by (cluster, namespace, kind, name)
-        all_matches.sort(key=lambda match: (
-            match.get("cluster", ""),
-            match.get("namespace", ""),
-            match.get("kind", ""),
-            match.get("name", "")
-        ))
+        all_matches.sort(
+            key=lambda match: (
+                match.get("cluster", ""),
+                match.get("namespace", ""),
+                match.get("kind", ""),
+                match.get("name", ""),
+            )
+        )
 
         # Deduplicate truncated kinds across clusters
-        truncated_kinds = sorted({
-            kind for match in all_matches
-            if match.get("truncated_kinds")
-            for kind in match.get("truncated_kinds", [])
-        })
+        truncated_kinds = sorted(
+            {
+                kind
+                for match in all_matches
+                if match.get("truncated_kinds")
+                for kind in match.get("truncated_kinds", [])
+            }
+        )
 
         # Determine if any results were truncated
         truncated = len(truncated_kinds) > 0
