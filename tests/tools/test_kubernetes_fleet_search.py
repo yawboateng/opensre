@@ -25,6 +25,7 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from integrations.kubernetes.tools.fleet_search import (
+    _FLEET_SEARCH_DEADLINE_SECONDS,
     KubernetesSearchFleetTool,
     _search_one_cluster_pods,
     _search_one_cluster_workloads,
@@ -844,3 +845,22 @@ def test_the_connection_fields_it_declares_as_injected_are_the_ones_it_extracts(
     assert extracted["context"] == "prod"
     assert extracted["default_namespace"] == "payments"
     assert isinstance(extracted["cluster_configs"], dict)
+
+
+def test_the_fan_out_budget_still_fits_inside_a_gateway_turn() -> None:
+    """The deadline is a tuning constant, but not a free one.
+
+    ``_BoundedApiClient`` allows 5s connect / 60s read per request and one
+    cluster issues five sequential kind calls, so a fan-out with no budget of
+    its own can burn 300s — longer than the turn that is waiting for it. The
+    upper bound below is what makes the deadline a deadline: raise it past the
+    turn timeout and the tool is back to being killed mid-flight, with the same
+    "the bot said nothing" symptom this budget exists to prevent.
+    """
+    from gateway.transports.slack.settings import SlackGatewaySettings
+
+    turn_budget = SlackGatewaySettings.model_fields["turn_timeout_seconds"].default
+
+    assert _FLEET_SEARCH_DEADLINE_SECONDS > 0.0
+    # Room left for the model's follow-up call in the same turn.
+    assert turn_budget / 2 >= _FLEET_SEARCH_DEADLINE_SECONDS
