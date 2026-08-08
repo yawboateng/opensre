@@ -22,7 +22,6 @@ from kubernetes import config as k8s_config
 from kubernetes.client.exceptions import ApiException
 from kubernetes.config.config_exception import ConfigException
 
-from config.constants import DEFAULT_KUBERNETES_NAMESPACE
 from integrations.config_models import KubernetesIntegrationConfig
 from integrations.probes import ProbeResult
 from platform.observability.errors.service import capture_service_error
@@ -613,7 +612,9 @@ class KubernetesClient:
                 )
             return {"success": True, "namespaces": namespaces, "total": len(namespaces)}
         except ApiException as exc:
-            capture_service_error(exc, logger=logger, integration="kubernetes", method="list_namespaces")
+            capture_service_error(
+                exc, logger=logger, integration="kubernetes", method="list_namespaces"
+            )
             # Include forbidden flag for 403/401 to enable graceful degradation
             extra_data = {"forbidden": True} if exc.status in (401, 403) else {}
             return {
@@ -622,7 +623,9 @@ class KubernetesClient:
                 **extra_data,
             }
         except Exception as exc:
-            capture_service_error(exc, logger=logger, integration="kubernetes", method="list_namespaces")
+            capture_service_error(
+                exc, logger=logger, integration="kubernetes", method="list_namespaces"
+            )
             return {"success": False, "error": str(exc)}
 
     def list_services(

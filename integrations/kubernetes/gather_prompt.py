@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 def kubernetes_gather_prompt_fragment() -> str:
     """Kubernetes investigation rules for gather stage."""
     return (
@@ -15,5 +16,6 @@ def kubernetes_gather_prompt_fragment() -> str:
         "cluster is healthy — it is evidence that namespace is empty. Say which "
         "cluster and namespace were checked."
     )
+
 
 __all__ = ["kubernetes_gather_prompt_fragment"]
