@@ -33,7 +33,7 @@ _REGISTRARS = frozenset(
 )
 
 sys.path.insert(0, str(_REPO_ROOT / ".github" / "ci"))
-from test_scope_rules import classify  # noqa: E402
+from test_scope_rules import classify  # type: ignore[import-not-found]  # noqa: E402
 
 
 def _registered_fragment_sources() -> list[str]:

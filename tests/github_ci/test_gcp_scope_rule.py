@@ -21,7 +21,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 sys.path.insert(0, str(_REPO_ROOT / ".github" / "ci"))
-from test_scope_rules import classify  # noqa: E402
+from test_scope_rules import classify  # type: ignore[import-not-found]  # noqa: E402
 
 #: Tests that assert on GCP tool metadata and live outside ``tests/integrations/``,
 #: which is what the catch-all would have given us.
