@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextvars
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -37,6 +38,28 @@ _FLEET_SEARCH_DEADLINE_SECONDS = 90.0
 #: (labels, creation timestamps, container detail); everything outside this set
 #: is dropped before the payload leaves the tool.
 _MATCH_FIELDS = ("cluster", "namespace", "kind", "name", "ready", "desired", "phase")
+
+
+def _submit_per_cluster(
+    executor: ThreadPoolExecutor,
+    search: Callable[..., dict[str, Any]],
+    *args: Any,
+) -> concurrent.futures.Future[dict[str, Any]]:
+    """Submit one cluster's search on its own private copy of the caller's context.
+
+    ``contextvars.Context`` is single-entry: ``Context.run`` sets an internal
+    "entered" flag for the duration of the call, so a second *concurrent* ``run``
+    on the same object raises ``RuntimeError: cannot enter context: <Context ...>
+    is already entered``. Sharing one ``copy_context()`` across this fan-out
+    therefore admits whichever worker wins the race and fails every other
+    cluster — a 17-cluster fleet reports one searched and sixteen failed.
+
+    The copy is taken **here**, on the submitting thread, not inside the worker:
+    copying inside the worker would snapshot the pool thread's context and drop
+    the caller's scope (``_CURRENT_SCOPE`` and friends), which is the whole
+    reason the context is propagated at all.
+    """
+    return executor.submit(contextvars.copy_context().run, search, *args)
 
 
 def _project_match(cluster_name: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -286,20 +309,21 @@ class KubernetesSearchFleetTool(BaseTool):
 
         # Phase 1: Search workload owners across fleet
         deadline = time.monotonic() + _FLEET_SEARCH_DEADLINE_SECONDS
-        ctx = contextvars.copy_context()
 
         # Use ThreadPoolExecutor without context manager to control shutdown properly
         executor = ThreadPoolExecutor(max_workers=_MAX_PARALLEL_CLUSTERS)
 
         try:
             # Submit phase 1 jobs
-            def _submit_workload_search(cname: str, cconn: dict[str, Any]) -> dict[str, Any]:
-                return ctx.run(
-                    _search_one_cluster_workloads, cname, cconn, name_contains, search_namespace
-                )
-
             phase1_futures = {
-                executor.submit(_submit_workload_search, cname, cconn): cname
+                _submit_per_cluster(
+                    executor,
+                    _search_one_cluster_workloads,
+                    cname,
+                    cconn,
+                    name_contains,
+                    search_namespace,
+                ): cname
                 for cname, cconn in selected_clusters.items()
             }
 
@@ -344,13 +368,15 @@ class KubernetesSearchFleetTool(BaseTool):
                 pods_searched = True
 
                 # Only search clusters that succeeded in phase 1
-                def _submit_pod_search(cname: str, cconn: dict[str, Any]) -> dict[str, Any]:
-                    return ctx.run(
-                        _search_one_cluster_pods, cname, cconn, name_contains, search_namespace
-                    )
-
                 phase2_futures = {
-                    executor.submit(_submit_pod_search, cname, selected_clusters[cname]): cname
+                    _submit_per_cluster(
+                        executor,
+                        _search_one_cluster_pods,
+                        cname,
+                        selected_clusters[cname],
+                        name_contains,
+                        search_namespace,
+                    ): cname
                     for cname in clusters_searched
                 }
 

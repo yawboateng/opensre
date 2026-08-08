@@ -16,6 +16,7 @@ leave this tool untouched and the test would pass vacuously.
 
 from __future__ import annotations
 
+import threading
 import time
 from http import HTTPStatus
 from typing import Any
@@ -24,8 +25,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from kubernetes.client.rest import ApiException
 
+from config.principal import Actor, Principal, StorageScope
+from config.scope_context import bound_storage_scope, current_scope
 from integrations.kubernetes.tools.fleet_search import (
     _FLEET_SEARCH_DEADLINE_SECONDS,
+    _MAX_PARALLEL_CLUSTERS,
     KubernetesSearchFleetTool,
     _search_one_cluster_pods,
     _search_one_cluster_workloads,
@@ -293,6 +297,80 @@ def test_every_selected_cluster_appears_in_exactly_one_bucket(
     assert searched | failed == set(selected)
     assert len(result["clusters_searched"]) + len(result["clusters_failed"]) == len(selected)
     assert result["partial"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tool: the fan-out really runs in parallel, and carries the caller's scope
+# ---------------------------------------------------------------------------
+
+
+def _overlapping_clusters(count: int) -> dict[str, dict[str, Any]]:
+    return {f"gke-{index}": _conn() for index in range(count)}
+
+
+def test_every_cluster_searches_even_when_the_workers_genuinely_overlap(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shared ``contextvars.Context`` admits one worker and fails the rest.
+
+    ``Context.run`` marks the context entered for the duration of the call, so a
+    second *concurrent* ``run`` on the same object raises ``RuntimeError: cannot
+    enter context``. Live, that reported one cluster searched and sixteen failed.
+
+    The barrier is the whole point: every other test in this file fakes helpers
+    that return instantly, so the workers never actually overlap and a shared
+    context is entered and exited one at a time. Sizing the barrier to the
+    cluster count forces all of them to be inside ``run`` simultaneously.
+    """
+    selected = _overlapping_clusters(_MAX_PARALLEL_CLUSTERS)
+    barrier = threading.Barrier(len(selected), timeout=10.0)
+
+    def _rendezvous(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        barrier.wait()
+        return _ok(cluster_name, [_row("svc-api")])
+
+    _patch_workloads(monkeypatch, _rendezvous)
+
+    result = tool.run(name_contains="svc", kubeconfig=_MINIMAL_KUBECONFIG, cluster_configs=selected)
+
+    assert result["clusters_failed"] == []
+    assert set(result["clusters_searched"]) == set(selected)
+    assert result["partial"] is False
+
+
+def test_the_callers_storage_scope_reaches_every_worker(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping the context propagation entirely also makes every cluster search.
+
+    So the test above cannot stand alone: deleting ``copy_context`` would pass it
+    while silently unbinding the turn's principal in every worker, which is how a
+    multi-tenant read crosses tenants. The copy must also be taken on the
+    *submitting* thread — copying inside the worker snapshots the pool thread's
+    empty context and fails here for the same reason.
+    """
+    selected = _overlapping_clusters(_MAX_PARALLEL_CLUSTERS)
+    barrier = threading.Barrier(len(selected), timeout=10.0)
+    scope = StorageScope(principal=Principal.org("org_acme"), actor=Actor(id="U_ALICE"))
+    seen: dict[str, StorageScope | None] = {}
+    seen_lock = threading.Lock()
+
+    def _record_scope(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        barrier.wait()
+        with seen_lock:
+            seen[cluster_name] = current_scope()
+        return _ok(cluster_name, [_row("svc-api")])
+
+    _patch_workloads(monkeypatch, _record_scope)
+
+    with bound_storage_scope(scope):
+        result = tool.run(
+            name_contains="svc", kubeconfig=_MINIMAL_KUBECONFIG, cluster_configs=selected
+        )
+
+    assert result["clusters_failed"] == []
+    assert set(seen) == set(selected)
+    assert set(seen.values()) == {scope}
 
 
 def test_a_phase_two_failure_moves_the_cluster_out_of_searched(
