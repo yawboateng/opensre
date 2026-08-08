@@ -26,7 +26,7 @@ from integrations.gcp.client import (
     describe_api_error,
 )
 from integrations.gcp.projects import group_projects, resolve_projects
-from integrations.gcp.tool_params import config_from, gcp_tool_params
+from integrations.gcp.tool_params import PROJECT_PROPERTY, config_from, gcp_tool_params
 from integrations.gcp.tools.gcp_error_reporting_tool.groups import normalize_groups
 
 _COMPONENT = "integrations.gcp.tools.gcp_error_reporting_tool"
@@ -135,14 +135,7 @@ def _fetch(
     input_schema={
         "type": "object",
         "properties": {
-            "project": {
-                "type": "string",
-                "description": (
-                    "Project id to query. Omit for the default project, pass a "
-                    "comma-separated list for several, or '*' for all configured "
-                    "projects. Call gcp_list_projects to discover valid values."
-                ),
-            },
+            "project": PROJECT_PROPERTY,
             "period": {
                 "type": "string",
                 "description": "Look-back window.",

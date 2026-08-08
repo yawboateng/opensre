@@ -27,7 +27,7 @@ from integrations.gcp.client import (
     describe_api_error,
 )
 from integrations.gcp.projects import group_projects, resolve_projects
-from integrations.gcp.tool_params import config_from
+from integrations.gcp.tool_params import PROJECT_PROPERTY, config_from
 from integrations.gcp.tools.gcp_list_gke_clusters_tool.clusters import normalize_clusters
 from integrations.gcp.tools.gcp_list_gke_clusters_tool.correlation import annotate
 from integrations.gcp.tools.gcp_list_gke_clusters_tool.params import gke_tool_params
@@ -95,14 +95,7 @@ def _list_clusters(service: Any, project: str) -> tuple[list[dict[str, Any]], li
     input_schema={
         "type": "object",
         "properties": {
-            "project": {
-                "type": "string",
-                "description": (
-                    "Project id to list. Omit for the default project, pass a "
-                    "comma-separated list for several, or '*' for all configured "
-                    "projects. Call gcp_list_projects to discover valid values."
-                ),
-            },
+            "project": PROJECT_PROPERTY,
         },
         "required": [],
     },

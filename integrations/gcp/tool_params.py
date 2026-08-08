@@ -25,6 +25,20 @@ _MODEL_FIELDS = frozenset(GCPIntegrationConfig.model_fields)
 
 _DEFAULT_LIMIT = 100
 
+PROJECT_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "default": "",
+    "description": (
+        "GCP project id to query. Pass it whenever the request names or implies "
+        "a specific project. Pass '*' for every configured project when you do "
+        "not know which one holds the data — logs, metrics and error reporting "
+        "are often centralised in a project other than the one running the "
+        "workload. Omitting silently reads only the default project, which may "
+        "not be the one asked about. Comma-separate several. Call "
+        "gcp_list_projects for valid names."
+    ),
+}
+
 
 def sanitize_config(raw: object) -> dict[str, Any]:
     """Drop every key ``GCPIntegrationConfig`` would reject.

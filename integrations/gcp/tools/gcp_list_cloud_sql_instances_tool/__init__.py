@@ -23,7 +23,7 @@ from integrations.gcp.client import (
     describe_api_error,
 )
 from integrations.gcp.projects import group_projects, resolve_projects
-from integrations.gcp.tool_params import config_from, gcp_tool_params
+from integrations.gcp.tool_params import PROJECT_PROPERTY, config_from, gcp_tool_params
 from integrations.gcp.tools.gcp_list_cloud_sql_instances_tool.instances import (
     RUNNABLE,
     normalize_instances,
@@ -94,14 +94,7 @@ def _fetch(service: Any, project: str, page_size: int, api_filter: str) -> dict[
     input_schema={
         "type": "object",
         "properties": {
-            "project": {
-                "type": "string",
-                "description": (
-                    "Project id to list. Omit for the default project, pass a "
-                    "comma-separated list for several, or '*' for all configured "
-                    "projects. Call gcp_list_projects to discover valid values."
-                ),
-            },
+            "project": PROJECT_PROPERTY,
             "state": {
                 "type": "string",
                 "description": "Return only instances in this state, e.g. SUSPENDED.",
