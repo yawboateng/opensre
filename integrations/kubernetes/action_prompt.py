@@ -15,7 +15,7 @@ def kubernetes_action_prompt_fragment() -> str:
         "An empty pod/deployment list from one namespace is not evidence that a "
         "cluster is healthy or that a workload is absent — a workload may be an "
         "Argo Rollout; use kubernetes_list_workloads for 'does X exist / is it "
-        "healthy'. Say which cluster and namespace were checked."
+        "healthy'. Say which cluster and namespace were checked. "
         "A cloud project named in an alert is a monitoring scope, not a runtime "
         "location: logs, metrics and Error Reporting may live in a dedicated "
         "observability project or beside the workload — it varies, so check "
