@@ -20,7 +20,7 @@ EXPECTED_INFRA_TOOLS_ON_ACTION = {
     # Kubernetes tools (9)
     "kubernetes_list_pods",
     "kubernetes_get_pod_logs",
-    "kubernetes_list_deployments",
+    "kubernetes_list_workloads",
     "kubernetes_get_events",
     "kubernetes_describe_pod",
     "kubernetes_list_namespaces",
@@ -41,6 +41,8 @@ EXCLUDED_INFRA_TOOLS = {
     "kubernetes_list_daemonsets",
     "kubernetes_list_ingresses",
     "kubernetes_list_configmaps",
+    "kubernetes_list_deployments",
+    "kubernetes_list_rollouts",
     "kubernetes_get_resource",
     "gcp_logging_query",
     "gcp_audit_log_query",
@@ -54,7 +56,7 @@ EXCLUDED_INFRA_TOOLS = {
 K8S_TOOLS_WITH_CLUSTER_PARAM = {
     "kubernetes_list_pods",
     "kubernetes_get_pod_logs",
-    "kubernetes_list_deployments",
+    "kubernetes_list_workloads",
     "kubernetes_get_events",
     "kubernetes_describe_pod",
     "kubernetes_list_namespaces",
@@ -174,7 +176,7 @@ def test_infra_tools_resolve_credentials_through_the_action_context():
         ctx, resolved_integrations=fake_integrations
     )
 
-    # All 13 must resolve, not just the kubernetes half. A gcp availability
+    # All 14 must resolve, not just the kubernetes half. A gcp availability
     # regression on this surface is caught here and nowhere else: registry
     # membership stays green while the model sees no gcp tool at all.
     resolved_infra = {

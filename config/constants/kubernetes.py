@@ -17,7 +17,17 @@ DEFAULT_KUBERNETES_NAMESPACE = "default"
 #: rather than replace the operator's declared set.
 KUBERNETES_INSTANCES_ENV = "KUBERNETES_INSTANCES"
 
+#: Argo Rollouts CRD coordinates. A Rollout replaces the Deployment as the
+#: owning workload object, so a cluster running Argo has real workloads that
+#: are invisible to every apps/v1 lister.
+ARGO_ROLLOUTS_GROUP = "argoproj.io"
+ARGO_ROLLOUTS_VERSION = "v1alpha1"
+ARGO_ROLLOUTS_PLURAL = "rollouts"
+
 __all__ = [
+    "ARGO_ROLLOUTS_GROUP",
+    "ARGO_ROLLOUTS_PLURAL",
+    "ARGO_ROLLOUTS_VERSION",
     "DEFAULT_KUBERNETES_NAMESPACE",
     "KUBECONFIG_CONTENT_ENV",
     "KUBECONFIG_CONTEXT_ENV",

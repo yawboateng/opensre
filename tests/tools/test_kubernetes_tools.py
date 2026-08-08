@@ -26,8 +26,10 @@ from integrations.kubernetes.tools import (
     KubernetesListNamespacesTool,
     KubernetesListNodesTool,
     KubernetesListPodsTool,
+    KubernetesListRolloutsTool,
     KubernetesListServicesTool,
     KubernetesListStatefulSetsTool,
+    KubernetesListWorkloadsTool,
 )
 from tests.tools.conftest import BaseToolContract, mock_agent_state
 
@@ -114,6 +116,16 @@ class TestKubernetesGetResourceContract(BaseToolContract):
         return KubernetesGetResourceTool()
 
 
+class TestKubernetesListWorkloadsContract(BaseToolContract):
+    def get_tool_under_test(self) -> Any:
+        return KubernetesListWorkloadsTool()
+
+
+class TestKubernetesListRolloutsContract(BaseToolContract):
+    def get_tool_under_test(self) -> Any:
+        return KubernetesListRolloutsTool()
+
+
 # ---------------------------------------------------------------------------
 # is_available / extract_params
 # ---------------------------------------------------------------------------
@@ -186,6 +198,28 @@ def _make_client_with_networking(mock_networking: MagicMock) -> Any:
     client._core_v1 = MagicMock()
     client._apps_v1 = MagicMock()
     client._networking_v1 = mock_networking
+    return client
+
+
+def _make_client_with_apis(
+    *,
+    core: Any = None,
+    apps: Any = None,
+    networking: Any = None,
+    custom: Any = None,
+    batch: Any = None,
+) -> Any:
+    """KubernetesClient with each API pre-seeded so no kubeconfig is loaded."""
+    from integrations.config_models import KubernetesIntegrationConfig
+    from integrations.kubernetes.client import KubernetesClient
+
+    cfg = KubernetesIntegrationConfig.model_validate({"kubeconfig": _MINIMAL_KUBECONFIG})
+    client = KubernetesClient(cfg)
+    client._core_v1 = core or MagicMock()
+    client._apps_v1 = apps or MagicMock()
+    client._networking_v1 = networking or MagicMock()
+    client._custom_objects = custom or MagicMock()
+    client._batch_v1 = batch or MagicMock()
     return client
 
 
@@ -926,6 +960,8 @@ def test_cluster_configs_is_protected_on_every_connection_tool() -> None:
         KubernetesListIngressesTool(),
         KubernetesListConfigMapsTool(),
         KubernetesGetResourceTool(),
+        KubernetesListWorkloadsTool(),
+        KubernetesListRolloutsTool(),
     ]
     for tool in connection_tools:
         assert "cluster_configs" in tool.injected_params, tool.name
@@ -1090,12 +1126,21 @@ def test_every_fetchable_resource_is_read_only() -> None:
     that argument stops being true and this fails rather than the docs quietly
     going stale.
     """
-    verbs = {method for _api, method, _cluster_scoped in _RESOURCE_DISPATCH.values()}
+    verbs = {entry.method for entry in _RESOURCE_DISPATCH.values()}
 
     assert verbs, "dispatch table is empty; this test would pass vacuously"
-    assert all(verb.startswith("read_") for verb in verbs), sorted(
-        verb for verb in verbs if not verb.startswith("read_")
+    # Allow both "read_" (typed clients) and "get_" (custom objects API)
+    read_only_verbs = [verb for verb in verbs if verb.startswith(("read_", "get_"))]
+    assert len(read_only_verbs) == len(verbs), (
+        f"Non-read-only verbs found: {sorted(verbs - set(read_only_verbs))}"
     )
+    # Explicit negative check for dangerous verbs
+    dangerous_verbs = [
+        v
+        for v in verbs
+        if v.startswith(("create_", "patch_", "delete_", "replace_", "post_", "put_"))
+    ]
+    assert not dangerous_verbs, f"Dangerous verbs found: {sorted(dangerous_verbs)}"
 
 
 def test_secrets_are_not_fetchable() -> None:
@@ -1223,6 +1268,24 @@ _NAMESPACED_TOOL_CASES: list[tuple[Any, str, dict[str, Any], dict[str, Any]]] = 
         {"resource_type": "pod", "name": "p"},
         {"resource": {}, "resource_type": "pod", "name": "p"},
     ),
+    (
+        KubernetesListWorkloadsTool,
+        "list_workloads",
+        {},
+        {
+            "workloads": [],
+            "total": 0,
+            "truncated": False,
+            "truncated_kinds": [],
+            "unavailable_kinds": [],
+        },
+    ),
+    (
+        KubernetesListRolloutsTool,
+        "list_rollouts",
+        {},
+        {"rollouts": [], "total": 0, "truncated": False},
+    ),
 ]
 
 
@@ -1337,6 +1400,535 @@ def test_list_namespaces_flags_denial_without_filing_an_error_for_403(
     assert result["success"] is False
     assert result.get("forbidden", False) is expect_forbidden
     assert bool(reported) is expect_reported
+
+
+# ---------------------------------------------------------------------------
+# New workloads and rollouts tests
+# ---------------------------------------------------------------------------
+
+
+def test_list_workloads_reports_rollouts_alongside_deployments() -> None:
+    """Test that list_workloads includes Rollouts alongside Deployments."""
+    mock_apps = MagicMock()
+    mock_batch = MagicMock()
+    mock_custom = MagicMock()
+
+    # Set up deployment response
+    deployment = MagicMock()
+    deployment.metadata.name = "web-app"
+    deployment.metadata.namespace = "default"
+    deployment.spec.replicas = 3
+    deployment.status.ready_replicas = 3
+    deployment.status.updated_replicas = 3
+    deployment.status.available_replicas = 3
+    deployment.metadata.labels = {"app": "web"}
+    deployment.metadata.creation_timestamp = "2023-01-01T00:00:00Z"
+
+    deployment_list = MagicMock()
+    deployment_list.items = [deployment]
+    deployment_list.metadata._continue = ""
+    mock_apps.list_namespaced_deployment.return_value = deployment_list
+
+    # Set up StatefulSet, DaemonSet, CronJob empty responses
+    empty_list = MagicMock()
+    empty_list.items = []
+    empty_list.metadata._continue = ""
+    mock_apps.list_namespaced_stateful_set.return_value = empty_list
+    mock_apps.list_namespaced_daemon_set.return_value = empty_list
+    mock_batch.list_namespaced_cron_job.return_value = empty_list
+
+    # Set up rollout response (CRD returns dict)
+    rollout_item = {
+        "metadata": {
+            "name": "api-service",
+            "namespace": "default",
+            "labels": {"app": "api"},
+            "creationTimestamp": "2023-01-01T00:00:00Z",
+        },
+        "spec": {"replicas": 2},
+        "status": {
+            "readyReplicas": 2,
+            "updatedReplicas": 2,
+            "availableReplicas": 2,
+            "phase": "Healthy",
+        },
+    }
+    rollout_response = {"items": [rollout_item], "metadata": {}}
+    mock_custom.list_namespaced_custom_object.return_value = rollout_response
+
+    client = _make_client_with_apis(apps=mock_apps, batch=mock_batch, custom=mock_custom)
+
+    result = client.list_workloads(namespace="default", limit=50)
+
+    assert result["success"] is True
+    workloads = result["workloads"]
+
+    # Should have both deployment and rollout
+    kinds = {w["kind"] for w in workloads}
+    assert "Deployment" in kinds
+    assert "Rollout" in kinds
+
+    # Check rollout fields survive
+    rollout = next(w for w in workloads if w["kind"] == "Rollout")
+    assert rollout["name"] == "api-service"
+    assert rollout["ready"] == 2
+    assert rollout["desired"] == 2
+    assert rollout["phase"] == "Healthy"
+
+
+def test_list_workloads_degrades_when_the_rollouts_crd_is_absent() -> None:
+    """Test that list_workloads degrades gracefully when Rollouts CRD is absent."""
+    mock_apps = MagicMock()
+    mock_batch = MagicMock()
+    mock_custom = MagicMock()
+
+    # Set up successful responses for built-in types
+    deployment = MagicMock()
+    deployment.metadata.name = "app"
+    deployment.items = [deployment]
+    deployment_list = MagicMock()
+    deployment_list.items = [deployment]
+    deployment_list.metadata._continue = ""
+    mock_apps.list_namespaced_deployment.return_value = deployment_list
+
+    empty_list = MagicMock()
+    empty_list.items = []
+    empty_list.metadata._continue = ""
+    mock_apps.list_namespaced_stateful_set.return_value = empty_list
+    mock_apps.list_namespaced_daemon_set.return_value = empty_list
+    mock_batch.list_namespaced_cron_job.return_value = empty_list
+
+    # Rollouts CRD is absent (404)
+    mock_custom.list_namespaced_custom_object.side_effect = ApiException(
+        status=404, reason="Not Found"
+    )
+
+    client = _make_client_with_apis(apps=mock_apps, batch=mock_batch, custom=mock_custom)
+
+    result = client.list_workloads(namespace="default", limit=50)
+
+    assert result["success"] is True
+    assert len(result["unavailable_kinds"]) == 1
+    assert result["unavailable_kinds"][0]["kind"] == "Rollout"
+    assert "404" in result["unavailable_kinds"][0]["reason"]
+
+    # Other kinds should still be present
+    kinds = {w["kind"] for w in result["workloads"]}
+    assert "Deployment" in kinds
+
+
+def test_list_workloads_files_no_sentry_error_for_an_absent_crd() -> None:
+    """Test that absent CRD (404/403) doesn't trigger Sentry error."""
+    mock_apps = MagicMock()
+    mock_batch = MagicMock()
+    mock_custom = MagicMock()
+
+    # Set up empty responses for built-in types
+    empty_list = MagicMock()
+    empty_list.items = []
+    empty_list.metadata._continue = ""
+    mock_apps.list_namespaced_deployment.return_value = empty_list
+    mock_apps.list_namespaced_stateful_set.return_value = empty_list
+    mock_apps.list_namespaced_daemon_set.return_value = empty_list
+    mock_batch.list_namespaced_cron_job.return_value = empty_list
+
+    # Record capture_service_error calls
+    captured_errors = []
+
+    def _record(exc, **kwargs):
+        captured_errors.append((exc.status, kwargs.get("method")))
+
+    with patch("integrations.kubernetes.client.capture_service_error", side_effect=_record):
+        client = _make_client_with_apis(apps=mock_apps, batch=mock_batch, custom=mock_custom)
+
+        # Test each status code
+        for status, should_report in [(404, False), (403, False), (401, True), (500, True)]:
+            captured_errors.clear()
+            mock_custom.list_namespaced_custom_object.side_effect = ApiException(status=status)
+
+            client.list_workloads(namespace="default", limit=50)
+
+            if should_report:
+                assert len(captured_errors) > 0, f"Status {status} should trigger error reporting"
+            else:
+                assert len(captured_errors) == 0, (
+                    f"Status {status} should not trigger error reporting"
+                )
+
+
+def test_list_workloads_reports_truncation_honestly() -> None:
+    """Test that list_workloads reports truncation correctly."""
+    mock_apps = MagicMock()
+    mock_batch = MagicMock()
+    mock_custom = MagicMock()
+
+    # Deployment has truncation
+    deployment_list = MagicMock()
+    deployment_list.items = []
+    deployment_list.metadata._continue = "token123"  # Truncated
+    mock_apps.list_namespaced_deployment.return_value = deployment_list
+
+    # Others are not truncated
+    empty_list = MagicMock()
+    empty_list.items = []
+    empty_list.metadata._continue = ""  # Not truncated
+    mock_apps.list_namespaced_stateful_set.return_value = empty_list
+    mock_apps.list_namespaced_daemon_set.return_value = empty_list
+    mock_batch.list_namespaced_cron_job.return_value = empty_list
+    mock_custom.list_namespaced_custom_object.return_value = {"items": [], "metadata": {}}
+
+    client = _make_client_with_apis(apps=mock_apps, batch=mock_batch, custom=mock_custom)
+
+    result = client.list_workloads(namespace="default", limit=50)
+
+    assert result["truncated"] is True
+    assert result["truncated_kinds"] == ["Deployment"]
+
+    # Test negative case - all empty
+    deployment_list.metadata._continue = ""
+    result = client.list_workloads(namespace="default", limit=50)
+    assert result["truncated"] is False
+    assert result["truncated_kinds"] == []
+
+
+def test_new_listers_keep_credentials_injected_and_selectors_model_facing() -> None:
+    """Test that new tools properly protect credentials and expose selectors."""
+    # Test both new tools
+    tools = [KubernetesListWorkloadsTool(), KubernetesListRolloutsTool()]
+
+    for tool in tools:
+        # Credentials must be injected (protected from model)
+        assert "cluster_configs" in tool.injected_params
+
+        # Selectors must NOT be injected (model-facing)
+        assert "namespace" not in tool.injected_params
+        assert "cluster" not in tool.injected_params
+
+        # Selectors must be in input schema (model can set them)
+        properties = tool.input_schema.get("properties", {})
+        assert "namespace" in properties
+        assert "cluster" in properties
+
+
+def test_model_cannot_override_cluster_configs_on_list_workloads() -> None:
+    """Test that model cannot override cluster_configs via malicious input."""
+    from core.execution import execute_tool_calls
+    from core.llm.types import ToolCall
+    from core.tool_framework.registered_tool import RegisteredTool
+
+    # Exactly like test_model_cannot_override_cluster_configs_via_tool_input
+    resolved = {
+        "kubernetes": {"kubeconfig_path": "/trusted/config", "context": "trusted-context"},
+        "_all_kubernetes_instances": [
+            {"name": "default", "tags": {}, "config": {"kubeconfig_path": "/trusted/config"}},
+        ],
+    }
+    malicious_input = {
+        "cluster_configs": {
+            "evil": {
+                "kubeconfig_path": "/evil/config",
+                "context": "evil-context",
+            }
+        },
+        "namespace": "default",
+    }
+
+    with patch("integrations.kubernetes.tools._make_client") as mock_make:
+        mock_client = MagicMock()
+        mock_client.list_workloads.return_value = {"success": True, "workloads": [], "total": 0}
+        mock_make.return_value = mock_client
+
+        execute_tool_calls(
+            [ToolCall(id="c1", name="kubernetes_list_workloads", input=malicious_input)],
+            [RegisteredTool.from_base_tool(KubernetesListWorkloadsTool())],
+            resolved,
+        )
+
+        # Should have been called with trusted config, not evil config
+        call_args = mock_make.call_args[0][0]
+        k8s_config = call_args["kubernetes"]
+        assert k8s_config["kubeconfig_path"] == "/trusted/config"
+        assert k8s_config["context"] == "trusted-context"
+
+
+def test_get_resource_fetches_a_rollout_with_env_values_redacted() -> None:
+    """Test that get_resource redacts env values from Rollout CRDs."""
+    mock_custom = MagicMock()
+
+    # Rollout with env values in the pod template
+    rollout_data = {
+        "metadata": {
+            "name": "test-rollout",
+            "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": '{"secret": "data"}',
+                "other-annotation": "keep-this",
+            },
+        },
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "app",
+                            "env": [
+                                {"name": "DB_URL", "value": "postgres://u:p@h/db"},
+                                {"name": "API_KEY", "value": "secret123"},
+                            ],
+                        }
+                    ]
+                }
+            }
+        },
+    }
+
+    mock_custom.get_namespaced_custom_object.return_value = rollout_data
+
+    client = _make_client_with_apis(custom=mock_custom)
+
+    result = client.get_resource(resource_type="rollout", namespace="default", name="test-rollout")
+
+    assert result["success"] is True
+    resource = result["resource"]
+
+    # Env names should be present but values removed
+    containers = resource["spec"]["template"]["spec"]["containers"]
+    env_entries = containers[0]["env"]
+    assert len(env_entries) == 2
+
+    for env_entry in env_entries:
+        assert "name" in env_entry  # Name kept
+        assert "value" not in env_entry  # Value removed
+        assert env_entry["name"] in ["DB_URL", "API_KEY"]
+
+    # last-applied-configuration annotation should be removed
+    annotations = resource["metadata"]["annotations"]
+    assert "kubectl.kubernetes.io/last-applied-configuration" not in annotations
+    assert annotations["other-annotation"] == "keep-this"
+
+
+def test_list_rollouts_surfaces_a_degraded_rollout() -> None:
+    """Test that list_rollouts correctly identifies a degraded rollout awaiting promotion."""
+    mock_custom = MagicMock()
+
+    # Rollout that is progressing, paused, with different current/stable revisions
+    rollout_item = {
+        "metadata": {
+            "name": "test-rollout",
+            "namespace": "default",
+            "labels": {"app": "test"},
+            "creationTimestamp": "2023-01-01T00:00:00Z",
+        },
+        "spec": {
+            "replicas": 2,
+            "paused": True,
+            "strategy": {"canary": {"steps": [{"setWeight": 20}, {"pause": {}}]}},
+        },
+        "status": {
+            "phase": "Progressing",
+            "replicas": 2,
+            "readyReplicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+            "currentStepIndex": 1,
+            "currentPodHash": "new-hash-123",
+            "stableRS": "old-hash-456",
+            "pauseConditions": [{"reason": "BlueGreenPause", "startTime": "2023-01-01T00:05:00Z"}],
+        },
+    }
+
+    rollout_response = {"items": [rollout_item], "metadata": {}}
+    mock_custom.list_namespaced_custom_object.return_value = rollout_response
+
+    client = _make_client_with_apis(custom=mock_custom)
+
+    result = client.list_rollouts(namespace="default", limit=50)
+
+    assert result["success"] is True
+    rollouts = result["rollouts"]
+    assert len(rollouts) == 1
+
+    rollout = rollouts[0]
+    assert rollout["phase"] == "Progressing"
+    assert rollout["ready"] == 1
+    assert rollout["desired"] == 2
+    assert rollout["awaiting_promotion"] is True  # paused=True + different revisions
+    assert rollout["strategy"] == "canary"
+    assert rollout["total_steps"] == 2
+    assert rollout["pause_reasons"] == ["BlueGreenPause"]
+
+
+def test_a_paused_rollout_on_the_stable_revision_is_not_awaiting_promotion() -> None:
+    """``paused`` alone must not read as "a new revision is waiting for you".
+
+    The positive case above sets both ``spec.paused`` and a differing revision
+    pair, so it cannot tell the two clauses apart. A blue-green Rollout that is
+    paused *on the revision already serving traffic* has nothing to promote —
+    reporting otherwise sends an operator to promote a no-op during an incident.
+    Pause here comes only from ``status.pauseConditions`` so that path is
+    exercised too.
+    """
+    mock_custom = MagicMock()
+    mock_custom.list_namespaced_custom_object.return_value = {
+        "items": [
+            {
+                "metadata": {"name": "bg", "namespace": "default"},
+                "spec": {"replicas": 2, "strategy": {"blueGreen": {"activeService": "svc"}}},
+                "status": {
+                    "phase": "Paused",
+                    "currentPodHash": "same-hash",
+                    "stableRS": "same-hash",
+                    "pauseConditions": [{"reason": "BlueGreenPause"}],
+                },
+            }
+        ],
+        "metadata": {},
+    }
+
+    result = _make_client_with_apis(custom=mock_custom).list_rollouts(namespace="default")
+
+    rollout = result["rollouts"][0]
+    assert rollout["paused"] is True, "status.pauseConditions must drive paused"
+    assert rollout["awaiting_promotion"] is False
+    assert rollout["strategy"] == "blueGreen"
+
+
+@pytest.mark.parametrize(
+    ("status", "expect_reported"),
+    [
+        (HTTPStatus.NOT_FOUND, False),
+        (HTTPStatus.FORBIDDEN, False),
+        (HTTPStatus.UNAUTHORIZED, True),
+        (HTTPStatus.INTERNAL_SERVER_ERROR, True),
+    ],
+)
+def test_list_rollouts_flags_an_absent_crd_without_filing_an_error(
+    status: HTTPStatus, expect_reported: bool
+) -> None:
+    """A cluster that does not run Argo is expected, not an incident.
+
+    404/403 must degrade to ``kind_unavailable`` and skip telemetry, or every
+    turn against a non-Argo cluster files one Sentry error forever. 401 is a
+    real credential failure and keeps both the generic error and the report.
+    """
+    mock_custom = MagicMock()
+    mock_custom.list_namespaced_custom_object.side_effect = ApiException(
+        status=int(status), reason="boom"
+    )
+    reported: list[Any] = []
+
+    with patch(
+        "integrations.kubernetes.client.capture_service_error",
+        side_effect=lambda exc, **_kw: reported.append(exc),
+    ):
+        result = _make_client_with_apis(custom=mock_custom).list_rollouts(namespace="default")
+
+    assert result["success"] is False
+    assert result.get("kind_unavailable", False) is not expect_reported
+    assert bool(reported) is expect_reported
+
+
+def test_rollouts_tool_says_the_crd_is_absent_rather_than_failing() -> None:
+    """The absent-CRD answer must reach the model as "not checked", not "error"."""
+    tool = KubernetesListRolloutsTool()
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_rollouts.return_value = {
+        "success": False,
+        "error": "Kubernetes API error 404: Not Found",
+        "kind_unavailable": True,
+    }
+
+    with patch("integrations.kubernetes.tools._make_client", return_value=client):
+        result = tool.run(kubeconfig=_MINIMAL_KUBECONFIG, namespace="default")
+
+    assert result["available"] is True
+    assert result["crd_installed"] is False
+    assert result["rollouts"] == []
+    assert "not evidence the workload is missing" in result["note"]
+
+
+def test_workloads_tool_forwards_unavailable_kinds_to_the_model() -> None:
+    """An unreadable kind must stay visible at the tool boundary.
+
+    The tool description promises "an empty result for a kind means 'none
+    exist', not 'not checked'". Dropping ``unavailable_kinds`` on the way out
+    turns a namespace whose Rollouts are unreadable into a confident "no such
+    workload" — the exact production failure this slice exists to fix.
+    """
+    tool = KubernetesListWorkloadsTool()
+    unavailable = [{"kind": "Rollout", "reason": "Kubernetes API error 403: Forbidden"}]
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_workloads.return_value = {
+        "success": True,
+        "workloads": [],
+        "total": 0,
+        "truncated": False,
+        "truncated_kinds": [],
+        "unavailable_kinds": unavailable,
+    }
+
+    with patch("integrations.kubernetes.tools._make_client", return_value=client):
+        result = tool.run(kubeconfig=_MINIMAL_KUBECONFIG, namespace="default")
+
+    assert result["unavailable_kinds"] == unavailable
+
+
+def test_list_workloads_reports_cronjobs_without_their_env_values() -> None:
+    """CronJobs are one of the five advertised kinds, and carry credentials.
+
+    ``_redact_env_values`` does not walk ``spec.jobTemplate.spec.template``, so
+    the only thing keeping a CronJob's env out of the payload is that the row
+    projection is an allowlist. Real SDK models are used rather than MagicMock
+    because a Mock answers every attribute and would hide both facts.
+    """
+    from kubernetes import client as k8s
+
+    template = k8s.V1PodTemplateSpec(
+        metadata=k8s.V1ObjectMeta(name="t"),
+        spec=k8s.V1PodSpec(
+            containers=[
+                k8s.V1Container(
+                    name="c", env=[k8s.V1EnvVar(name="DB_URL", value="postgres://u:pw@h/db")]
+                )
+            ]
+        ),
+    )
+    cron_jobs = k8s.V1CronJobList(
+        items=[
+            k8s.V1CronJob(
+                metadata=k8s.V1ObjectMeta(name="nightly", namespace="default"),
+                spec=k8s.V1CronJobSpec(
+                    schedule="0 0 * * *",
+                    suspend=False,
+                    job_template=k8s.V1JobTemplateSpec(spec=k8s.V1JobSpec(template=template)),
+                ),
+            )
+        ],
+        metadata=k8s.V1ListMeta(),
+    )
+
+    mock_apps = MagicMock()
+    empty = MagicMock()
+    empty.items = []
+    empty.metadata._continue = ""
+    mock_apps.list_namespaced_deployment.return_value = empty
+    mock_apps.list_namespaced_stateful_set.return_value = empty
+    mock_apps.list_namespaced_daemon_set.return_value = empty
+    mock_batch = MagicMock()
+    mock_batch.list_namespaced_cron_job.return_value = cron_jobs
+    mock_custom = MagicMock()
+    mock_custom.list_namespaced_custom_object.return_value = {"items": [], "metadata": {}}
+
+    result = _make_client_with_apis(
+        apps=mock_apps, batch=mock_batch, custom=mock_custom
+    ).list_workloads(namespace="default")
+
+    rows = result["workloads"]
+    assert [row["kind"] for row in rows] == ["CronJob"]
+    assert rows[0]["name"] == "nightly"
+    assert rows[0]["phase"] == "Active"
+    assert "pw@h" not in repr(result), "CronJob env values must never reach the payload"
 
 
 @pytest.mark.parametrize(
