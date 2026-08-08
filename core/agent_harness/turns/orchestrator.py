@@ -313,6 +313,17 @@ def _is_non_investigation_handoff(handoff_contents: tuple[str, ...]) -> bool:
 
 
 @dataclass(frozen=True)
+class _GatherOutcome:
+    """Result of the gather+answer path, plus whether the surface held the paint."""
+
+    run: Any | None
+    observation: str | None
+    #: ``stream()`` deferred delivery to ``finish_streamed_response``. True only
+    #: when an answer actually streamed — an error or cancel already painted.
+    paint_deferred: bool
+
+
+@dataclass(frozen=True)
 class _RouteOutcome:
     """Effects of one routed path, ready to pack into ``TurnResult``."""
 
@@ -321,6 +332,7 @@ class _RouteOutcome:
     llm_run: Any | None = None
     # Gather / action evidence to arm PendingInvestigationOffer (not session stash).
     evidence_for_offer: str | None = None
+    paint_deferred: bool = False
 
 
 def _cancelled_turn_result(
@@ -363,7 +375,7 @@ def _gather_and_answer(
     turn_plan: TurnPlan,
     handoff_requires_gather: bool = True,
     output: OutputSink | None = None,
-) -> tuple[Any | None, str | None] | None:
+) -> _GatherOutcome | None:
     """Run gather+answer, or ``None`` when the host cancelled mid-path."""
     # Two cases skip the live gather loop:
     # 1. Answer-only handoffs (``requires_gather=false``): the action turn's
@@ -401,6 +413,7 @@ def _gather_and_answer(
     # Follow-ups skip that rewrite; deferring on non-TTY would hold the whole
     # answer forever (oracle / CI consoles use force_terminal=False).
     observation = gathered if gathered else None
+    defer_paint = not skip_gather
     run = answer(
         text,
         AnswerRequest(
@@ -408,16 +421,18 @@ def _gather_and_answer(
             tool_observation_on_screen=observation is None,
             handoff_contents=handoff_contents,
             turn_plan=turn_plan,
-            defer_want_me_to_closer=not skip_gather,
+            defer_want_me_to_closer=defer_paint,
         ),
     )
     if host_cancel_requested(output):
         return None
-    return run, observation
+    return _GatherOutcome(
+        run=run, observation=observation, paint_deferred=defer_paint and run is not None
+    )
 
 
 def _finish_streamed_response(output: OutputSink | None, text: str) -> None:
-    """Flush deferred/rewritten gather paint on surfaces that support it."""
+    """Flush deferred/rewritten gather paint exactly when paint was deferred."""
     if output is None:
         return
     finish = getattr(output, "finish_streamed_response", None)
@@ -585,12 +600,12 @@ def run_turn(
                 )
             if gathered_outcome is None:
                 return _cancelled_turn_result(accounting, action_result)
-            run, gathered = gathered_outcome
             outcome = _RouteOutcome(
                 final_intent="cli_agent_fallback",
-                response_text=_response_text(run),
-                llm_run=run,
-                evidence_for_offer=gathered,
+                response_text=_response_text(gathered_outcome.run),
+                llm_run=gathered_outcome.run,
+                evidence_for_offer=gathered_outcome.observation,
+                paint_deferred=gathered_outcome.paint_deferred,
             )
         else:
             raise AssertionError(f"Unknown route intent: {route.intent!r}")
@@ -615,7 +630,6 @@ def run_turn(
                     observation=outcome.evidence_for_offer,
                 )
                 outcome = replace(outcome, response_text=response_text)
-                _finish_streamed_response(output, response_text)
             else:
                 arm_pending_investigation_offer(
                     session,
@@ -623,11 +637,14 @@ def run_turn(
                     assistant_text=outcome.response_text,
                     observation=outcome.evidence_for_offer,
                 )
-                # Follow-up / setup-query gather answers may still have deferred
-                # paint if a prior path set defer=True; flush so non-TTY hosts
-                # see text.
-                if route.intent == "gather_and_answer":
-                    _finish_streamed_response(output, outcome.response_text)
+
+        # The guard above governs the *offer*, not the paint. A gateway session
+        # has no investigation capability and a turn that confirmed a pending
+        # offer arms nothing — but both still streamed with delivery held back,
+        # so skipping the flush drops the tail of the answer and leaves the
+        # surface's stream open.
+        if outcome.paint_deferred:
+            _finish_streamed_response(output, outcome.response_text)
 
         return accounting.finalize(
             TurnResult(

@@ -701,3 +701,142 @@ def test_refresh_is_unavailable_without_configuration() -> None:
     result = gcp_refresh_discovery()
 
     assert result["available"] is False
+
+
+# --- project selection guidance ----------------------------------------------
+
+#: Every GCP tool whose ``project`` argument is the shared ``PROJECT_PROPERTY``.
+#: ``gcp_monitoring_query`` is deliberately absent — one metrics scope per call,
+#: so it carries its own text and is pinned separately below.
+_TOOLS_WITH_SHARED_PROJECT_PROPERTY = (
+    "gcp_audit_log_query",
+    "gcp_error_reporting_top_errors",
+    "gcp_list_cloud_run_services",
+    "gcp_list_cloud_sql_instances",
+    "gcp_list_compute_instances",
+    "gcp_list_gke_clusters",
+    "gcp_logging_query",
+    "gcp_pubsub_backlog",
+)
+
+
+@pytest.mark.parametrize("name", _TOOLS_WITH_SHARED_PROJECT_PROPERTY)
+def test_the_project_description_warns_that_omitting_narrows_to_the_default(name: str) -> None:
+    """Omission is the silent failure, so the schema has to name it.
+
+    The model's default behaviour is to leave an optional argument out. On a
+    12-project estate that reads one project and reports a confident nothing,
+    which is indistinguishable from a correct negative. The description is the
+    only place that can say so before the call is made.
+    """
+    registered = get_registered_tool(name)
+    assert registered is not None
+
+    description = registered.input_schema["properties"]["project"]["description"]
+
+    assert "Omitting" in description
+    assert "default project" in description
+    assert "'*'" in description
+    assert "gcp_list_projects" in description
+
+
+@pytest.mark.parametrize("name", _TOOLS_WITH_SHARED_PROJECT_PROPERTY)
+def test_project_is_never_an_injected_param(name: str) -> None:
+    """An injected key is re-forced over model input, which makes the arg inert."""
+    registered = get_registered_tool(name)
+    assert registered is not None
+
+    assert "project" not in (registered.injected_params or ())
+
+
+def test_monitoring_says_scope_not_narrower_reach() -> None:
+    """One scope per call is a *call-shape* limit, not a reach limit.
+
+    A scoping project's series already span every project it monitors. Text
+    that reads like "monitoring only sees one project" would push the model
+    into per-project fan-out it cannot do here, or into concluding a metric is
+    missing when it is simply attributed to another project id. And ``'*'``
+    must not appear: Cloud Monitoring rejects it outright.
+    """
+    registered = get_registered_tool("gcp_monitoring_query")
+    assert registered is not None
+
+    description = registered.input_schema["properties"]["project"]["description"]
+
+    # The requirement is "must not *advertise* '*'". The mandated wording says
+    # the tool takes "no list and no '*'", so the literal token is present as a
+    # prohibition. Assert the prohibition rather than the token's absence:
+    # Cloud Monitoring rejects '*' outright, and saying so beats silence.
+    assert "no '*'" in description
+    assert "metrics scope" in description
+    assert "every project it monitors" in description
+    # The recovery step, not just the constraint: the caller has to be told how
+    # to tell the series apart once they arrive under one scope.
+    assert "resource_labels.project_id" in description
+
+    top_level = registered.description
+    assert "one metrics scope" in top_level
+    assert "one project" not in top_level
+
+    anti = " ".join(registered.anti_examples or ())
+    assert "call-shape limit, not a reach limit" in anti
+
+
+def test_logging_query_sweeps_twelve_projects_in_one_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloud Logging batches up to 100 resourceNames, so '*' is one call.
+
+    This is what makes the "sweep with project='*'" guidance in the Kubernetes
+    prompt fragment affordable. Fanning out per project would be twelve round
+    trips and a much slower turn, and would tempt a future change to cap the
+    sweep.
+    """
+    import integrations.gcp.tools.gcp_logging_query_tool as module
+
+    projects = [f"proj-{index:02d}" for index in range(12)]
+    config = {"project_id": projects[0], "additional_projects": projects[1:]}
+
+    calls: list[dict[str, Any]] = []
+    pages = [{"entries": [_entry("2026-08-05T12:00:00Z", "boom")]}]
+    monkeypatch.setattr(
+        module, "build_service", lambda _config, _api: _FakeLoggingService(calls, pages)
+    )
+
+    result = gcp_logging_query(
+        project="*",
+        default_project=projects[0],
+        available_projects=projects,
+        project_configs=dict.fromkeys(projects, config),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["resourceNames"] == [f"projects/{name}" for name in projects]
+    assert result["projects"] == projects
+
+
+def test_logging_query_still_prefers_pod_logs_for_a_live_pod() -> None:
+    """Reaching the chat surface must not make this the default log tool.
+
+    ``kubernetes_get_pod_logs`` is faster and needs no Cloud Logging grant, so
+    the anti-example has to survive — while still saying when Cloud Logging is
+    the right answer, or the model will avoid it for a pod that no longer
+    exists.
+    """
+    registered = get_registered_tool("gcp_logging_query")
+    assert registered is not None
+
+    anti = " ".join(registered.anti_examples or ())
+
+    assert "kubernetes_get_pod_logs" in anti
+    assert "the pod is gone" in anti
+    # The capability that earns it a place on the chat surface.
+    use_cases = " ".join(registered.use_cases or ())
+    assert "cluster_name" in use_cases and "namespace_name" in use_cases
+
+
+def test_logging_query_is_on_the_chat_and_action_surfaces() -> None:
+    registered = get_registered_tool("gcp_logging_query")
+    assert registered is not None
+
+    assert "action" in (registered.surfaces or ())

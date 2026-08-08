@@ -22,6 +22,41 @@ class PathRule:
     always_escalate: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class FilenameRule:
+    """Map changed files by basename to extra targets, whatever package they sit in.
+
+    Unlike :class:`PathRule`, these are *additive*: a matching file still runs
+    its own package's targets. Use this when a convention-named file in any
+    package feeds one shared, cross-cutting test.
+    """
+
+    filenames: tuple[str, ...]
+    test_targets: tuple[str, ...]
+
+
+# Convention-named files that feed a shared test no prefix rule can own.
+#
+# ``<vendor>/action_prompt.py`` and ``<vendor>/gather_prompt.py`` are registered
+# as prompt fragments by ``harness_adapters.py`` and rendered into the committed
+# prompt snapshot, so editing one goes red in the full suite unless the snapshot
+# is regenerated in the same change. Prefix rules cannot cover this: ``classify``
+# stops at the first matching prefix, so a vendor's own rule would shadow it, and
+# most of these vendors have no rule at all. Keyed on the filename so a vendor
+# added later is covered without touching this table.
+FILENAME_RULES: tuple[FilenameRule, ...] = (
+    FilenameRule(
+        (
+            "action_prompt.py",
+            "assistant_prompt.py",
+            "gather_prompt.py",
+            "harness_adapters.py",
+        ),
+        ("tests/core/agent/prompts/test_prompt_characterization.py",),
+    ),
+)
+
+
 # Matched in list order — more specific prefixes must appear before parents.
 RULES: tuple[PathRule, ...] = (
     # User-facing quickstart surface
@@ -249,10 +284,8 @@ RULES: tuple[PathRule, ...] = (
             "tests/tools/test_infra_tools_on_action_surface.py",
             "tests/tools/test_telemetry.py",
             "tests/tools/test_registry_index.py",
-            # action_prompt.py / gather_prompt.py feed the committed prompt
-            # snapshot, so editing them here goes red in the full suite unless
-            # the snapshot is regenerated in the same change.
-            "tests/core/agent/prompts/test_prompt_characterization.py",
+            # action_prompt.py / gather_prompt.py here reach the prompt snapshot
+            # through FILENAME_RULES, not this list.
         ),
     ),
     PathRule(
@@ -569,6 +602,23 @@ RULES: tuple[PathRule, ...] = (
             "tests/e2e/grafana_validation/",
         ),
     ),
+    PathRule(
+        "integrations/gcp/",
+        (
+            "tests/integrations/test_gcp_gke_autoregister.py",
+            "tests/integrations/test_gcp_gke_registration.py",
+            "tests/integrations/test_gcp_gke_scope.py",
+            "tests/integrations/test_gcp_project_discovery.py",
+            "tests/integrations/test_gcp_refresh_interval.py",
+            "tests/integrations/test_gcp.py",
+            "tests/tools/test_gcp_tools.py",
+            "tests/tools/test_gcp_infra_tools.py",
+            "tests/tools/test_gcp_service_tools.py",
+            "tests/tools/test_infra_tools_on_action_surface.py",
+            "tests/tools/test_telemetry.py",
+            "tests/tools/test_registry_index.py",
+        ),
+    ),
     PathRule("integrations/", ("tests/integrations/",)),
     PathRule("tools/system/fleet_monitoring/", ("tests/agent/", "tests/fleet_monitoring/")),
     PathRule("surfaces/cli/", ("tests/cli/",)),
@@ -640,6 +690,18 @@ def classify(changed: list[str]) -> tuple[bool, list[str], list[str]]:
     areas: list[str] = []
 
     for path in changed:
+        # Additive, and deliberately outside the prefix loop below: that loop
+        # stops at its first match, so a vendor's own rule would otherwise
+        # shadow the shared target. Contributes no area — this is an add-on to
+        # whatever the path already matches, not an app area of its own.
+        basename = path.rsplit("/", 1)[-1]
+        for filename_rule in FILENAME_RULES:
+            if basename not in filename_rule.filenames:
+                continue
+            for target in filename_rule.test_targets:
+                if target not in targets:
+                    targets.append(target)
+
         matched = False
         for rule in RULES:
             if not _matches(path, rule.path_prefix):

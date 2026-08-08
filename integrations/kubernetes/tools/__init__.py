@@ -218,6 +218,9 @@ class KubernetesListPodsTool(BaseTool):
         "Filtering pods by label selector to scope investigation",
         "Verifying that a deployment's pods are running after a rollout",
     ]
+    anti_examples = [
+        "Locating a pod when you do not know which cluster or namespace runs it (use kubernetes_search_fleet)",
+    ]
     surfaces = ("investigation", "chat", "action")
     requires = ["kubeconfig"]
     injected_params = [
@@ -1559,6 +1562,7 @@ class KubernetesListWorkloadsTool(BaseTool):
     anti_examples = [
         "Listing pods or checking restart counts (use kubernetes_list_pods)",
         "Reading Rollout strategy, step, or revision detail (use kubernetes_list_rollouts)",
+        "Locating a workload when you do not know which cluster runs it (use kubernetes_search_fleet)",
     ]
     surfaces = ("investigation", "chat", "action")
     requires = []

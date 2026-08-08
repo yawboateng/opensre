@@ -386,3 +386,47 @@ def test_error_after_partial_stream_appends_error_copy() -> None:
     assert "Something went wrong" in markdown
     assert "db-host" not in markdown
     assert len(client.stream_stops) == 1
+
+
+def test_deferred_stream_holds_tail_until_finish_streamed_response() -> None:
+    """The reported production symptom: a deferred stream is not self-closing.
+
+    On the streaming path a deferred ``stream()`` leaves the answer buffered in
+    ``_TurnStream._pending_parts`` and the Slack stream open. Only
+    ``finish_streamed_response`` appends the tail and issues ``chat.stopStream``
+    — when the orchestrator skipped that call the user saw the answer cut off
+    mid-word under a stream that never terminated.
+
+    ``update_interval_seconds`` is large on purpose: the default ``_sink()``
+    helper uses ``0.0``, which flushes every chunk and so cannot hold a tail.
+    """
+    client = _FakeMessagingClient(stream_ok=True)
+    sink = SlackOutputSink(
+        client=client,
+        channel_id="C222",
+        thread_ts="1700.100",
+        team_id="T111",
+        user_id="U111",
+        update_interval_seconds=1000.0,
+    )
+
+    text = sink.stream(
+        label="assistant",
+        chunks=iter(["the crashloop is off pod ", "svc-api-6c8f9d7b4-2xqlp"]),
+        defer_want_me_to_closer=True,
+    )
+
+    assert text == "the crashloop is off pod svc-api-6c8f9d7b4-2xqlp"
+    # Nothing delivered and the stream is still open: no answer text appended,
+    # no stopStream, and the classic placeholder path untouched.
+    assert client.all_streamed_chunks() == []
+    assert client.stream_stops == []
+    assert client.updates == []
+
+    sink.finish_streamed_response(text)
+
+    markdown = "".join(
+        chunk["text"] for chunk in client.all_streamed_chunks() if chunk["type"] == "markdown_text"
+    )
+    assert markdown == text
+    assert len(client.stream_stops) == 1

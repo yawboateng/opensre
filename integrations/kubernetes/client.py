@@ -41,6 +41,10 @@ _DEFAULT_LIMIT = 50
 # Truncating a namespace list at 50 defeats a discovery tool, and namespace
 # objects are small.
 _NAMESPACE_LIST_LIMIT = 200
+#: Fleet search lists whole clusters, so ``_DEFAULT_LIMIT`` (50) would truncate
+#: nearly every cluster and make "not found" meaningless. Truncation past this
+#: is reported, never hidden — see ``_list_was_truncated``.
+_FLEET_SEARCH_LIMIT = 500
 #: Statuses that mean "this credential may not enumerate namespaces cluster-wide"
 #: rather than "the cluster is broken". Both degrade the tool instead of failing it.
 _NAMESPACE_LIST_DENIED_STATUSES = frozenset({HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN})
@@ -1358,5 +1362,303 @@ class KubernetesClient:
         except Exception as exc:
             capture_service_error(
                 exc, logger=logger, integration="kubernetes", method="list_workloads"
+            )
+            return {"success": False, "error": str(exc)}
+
+    def search_workload_owners(
+        self, name_contains: str, namespace: str = "", limit: int = _FLEET_SEARCH_LIMIT
+    ) -> dict[str, Any]:
+        """Search for workload owners by name substring across namespaces.
+
+        Args:
+            name_contains: Case-insensitive substring of the workload name to find
+            namespace: Optional namespace to search in. Empty means all namespaces
+            limit: Maximum items to return per kind
+
+        Returns:
+            Dict with success, workloads list, total, truncated status, and unavailable kinds
+        """
+
+        @dataclass(frozen=True, slots=True)
+        class _KindPage:
+            rows: tuple[dict[str, Any], ...]
+            truncated: bool
+            unavailable_reason: str | None
+
+        def _collect_kind(
+            call: Callable[[], Any],
+            project: Callable[[Any], dict[str, Any]],
+            items_of: Callable[[Any], list[Any]],
+        ) -> _KindPage:
+            """Run one list call, degrading that kind alone on 404/403."""
+            try:
+                result = call()
+                items = items_of(result)
+                # Apply name filtering
+                filtered_items = []
+                for item in items:
+                    projected = project(item)
+                    item_name = projected.get("name") or ""
+                    if name_contains.strip().lower() in item_name.lower():
+                        filtered_items.append(projected)
+
+                return _KindPage(
+                    rows=tuple(filtered_items),
+                    truncated=_list_was_truncated(result),
+                    unavailable_reason=None,
+                )
+            except ApiException as exc:
+                if exc.status in _KIND_UNAVAILABLE_STATUSES:
+                    return _KindPage(
+                        rows=(),
+                        truncated=False,
+                        unavailable_reason=f"Kubernetes API error {exc.status}: {exc.reason}",
+                    )
+                raise  # Re-raise non-degradable exceptions
+
+        def _deployment_workload_row(item: Any) -> dict[str, Any]:
+            spec = getattr(item, "spec", None) or {}
+            status = getattr(item, "status", None) or {}
+            metadata = getattr(item, "metadata", None) or {}
+            return {
+                "kind": "Deployment",
+                "name": getattr(metadata, "name", None),
+                "namespace": getattr(metadata, "namespace", None),
+                "desired": getattr(spec, "replicas", None),
+                "ready": getattr(status, "ready_replicas", None),
+                "phase": None,
+            }
+
+        def _statefulset_workload_row(item: Any) -> dict[str, Any]:
+            spec = getattr(item, "spec", None) or {}
+            status = getattr(item, "status", None) or {}
+            metadata = getattr(item, "metadata", None) or {}
+            return {
+                "kind": "StatefulSet",
+                "name": getattr(metadata, "name", None),
+                "namespace": getattr(metadata, "namespace", None),
+                "desired": getattr(spec, "replicas", None),
+                "ready": getattr(status, "ready_replicas", None),
+                "phase": None,
+            }
+
+        def _daemonset_workload_row(item: Any) -> dict[str, Any]:
+            status = getattr(item, "status", None) or {}
+            metadata = getattr(item, "metadata", None) or {}
+            return {
+                "kind": "DaemonSet",
+                "name": getattr(metadata, "name", None),
+                "namespace": getattr(metadata, "namespace", None),
+                "desired": getattr(status, "desired_number_scheduled", None),
+                "ready": getattr(status, "number_ready", None),
+                "phase": None,
+            }
+
+        def _cronjob_workload_row(item: Any) -> dict[str, Any]:
+            spec = getattr(item, "spec", None) or {}
+            metadata = getattr(item, "metadata", None) or {}
+            phase = "Suspended" if getattr(spec, "suspend", False) else "Active"
+            return {
+                "kind": "CronJob",
+                "name": getattr(metadata, "name", None),
+                "namespace": getattr(metadata, "namespace", None),
+                "desired": None,
+                "ready": None,
+                "phase": phase,
+            }
+
+        def _rollout_workload_row(item: Any) -> dict[str, Any]:
+            spec = item.get("spec", {})
+            status = item.get("status", {})
+            metadata = item.get("metadata", {})
+            return {
+                "kind": "Rollout",
+                "name": metadata.get("name"),
+                "namespace": metadata.get("namespace"),
+                "desired": spec.get("replicas"),
+                "ready": status.get("readyReplicas"),
+                "phase": status.get("phase"),
+            }
+
+        try:
+            core_v1, apps_v1, networking_v1 = self._get_clients()
+            batch_v1 = self._get_batch()
+            custom_api = self._get_custom_objects()
+
+            # Determine which API calls to make based on namespace parameter
+            if namespace:
+                # Search specific namespace
+                deployment_page = _collect_kind(
+                    lambda: apps_v1.list_namespaced_deployment(namespace=namespace, limit=limit),
+                    _deployment_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                statefulset_page = _collect_kind(
+                    lambda: apps_v1.list_namespaced_stateful_set(namespace=namespace, limit=limit),
+                    _statefulset_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                daemonset_page = _collect_kind(
+                    lambda: apps_v1.list_namespaced_daemon_set(namespace=namespace, limit=limit),
+                    _daemonset_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                cronjob_page = _collect_kind(
+                    lambda: batch_v1.list_namespaced_cron_job(namespace=namespace, limit=limit),
+                    _cronjob_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                rollout_page = _collect_kind(
+                    lambda: custom_api.list_namespaced_custom_object(
+                        group=ARGO_ROLLOUTS_GROUP,
+                        version=ARGO_ROLLOUTS_VERSION,
+                        plural=ARGO_ROLLOUTS_PLURAL,
+                        namespace=namespace,
+                        limit=limit,
+                    ),
+                    _rollout_workload_row,
+                    lambda result: result.get("items", []),
+                )
+            else:
+                # Search all namespaces
+                deployment_page = _collect_kind(
+                    lambda: apps_v1.list_deployment_for_all_namespaces(limit=limit),
+                    _deployment_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                statefulset_page = _collect_kind(
+                    lambda: apps_v1.list_stateful_set_for_all_namespaces(limit=limit),
+                    _statefulset_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                daemonset_page = _collect_kind(
+                    lambda: apps_v1.list_daemon_set_for_all_namespaces(limit=limit),
+                    _daemonset_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                cronjob_page = _collect_kind(
+                    lambda: batch_v1.list_cron_job_for_all_namespaces(limit=limit),
+                    _cronjob_workload_row,
+                    lambda result: getattr(result, "items", []),
+                )
+
+                rollout_page = _collect_kind(
+                    lambda: custom_api.list_cluster_custom_object(
+                        group=ARGO_ROLLOUTS_GROUP,
+                        version=ARGO_ROLLOUTS_VERSION,
+                        plural=ARGO_ROLLOUTS_PLURAL,
+                        limit=limit,
+                    ),
+                    _rollout_workload_row,
+                    lambda result: result.get("items", []),
+                )
+
+            # Combine all rows and sort by (kind, namespace, name)
+            all_rows: list[dict[str, Any]] = []
+            all_rows.extend(deployment_page.rows)
+            all_rows.extend(statefulset_page.rows)
+            all_rows.extend(daemonset_page.rows)
+            all_rows.extend(cronjob_page.rows)
+            all_rows.extend(rollout_page.rows)
+
+            all_rows.sort(key=lambda row: (row["kind"], row["namespace"] or "", row["name"] or ""))
+
+            # Collect truncation and unavailable status
+            pages = [deployment_page, statefulset_page, daemonset_page, cronjob_page, rollout_page]
+            kind_names = ["Deployment", "StatefulSet", "DaemonSet", "CronJob", "Rollout"]
+
+            truncated_kinds = []
+            unavailable_kinds = []
+
+            for page, kind_name in zip(pages, kind_names):
+                if page.truncated:
+                    truncated_kinds.append(kind_name)
+                if page.unavailable_reason:
+                    unavailable_kinds.append(
+                        {
+                            "kind": kind_name,
+                            "reason": page.unavailable_reason,
+                        }
+                    )
+
+            return {
+                "success": True,
+                "workloads": all_rows,
+                "total": len(all_rows),
+                "truncated": any(page.truncated for page in pages),
+                "truncated_kinds": sorted(truncated_kinds),
+                "unavailable_kinds": unavailable_kinds,
+            }
+        except Exception as exc:
+            capture_service_error(
+                exc, logger=logger, integration="kubernetes", method="search_workload_owners"
+            )
+            return {"success": False, "error": str(exc)}
+
+    def search_pods(
+        self, name_contains: str, namespace: str = "", limit: int = _FLEET_SEARCH_LIMIT
+    ) -> dict[str, Any]:
+        """Search for pods by name substring across namespaces.
+
+        Args:
+            name_contains: Case-insensitive substring of the pod name to find
+            namespace: Optional namespace to search in. Empty means all namespaces
+            limit: Maximum pods to return
+
+        Returns:
+            Dict with success, pods list, total, and truncated status
+        """
+        try:
+            core_v1, _, _ = self._get_clients()
+
+            # Determine which API call to make based on namespace parameter
+            if namespace:
+                pod_list = core_v1.list_namespaced_pod(namespace=namespace, limit=limit)
+            else:
+                pod_list = core_v1.list_pod_for_all_namespaces(limit=limit)
+
+            pods = []
+            for pod in pod_list.items or []:
+                meta = pod.metadata
+                status = pod.status
+                pod_name = meta.name or ""
+
+                # Apply name filtering
+                if name_contains.strip().lower() in pod_name.lower():
+                    containers = [
+                        {"name": c.name, "ready": c.ready, "restart_count": c.restart_count}
+                        for c in (status.container_statuses or [])
+                    ]
+
+                    pods.append(
+                        {
+                            "kind": "Pod",
+                            "name": meta.name,
+                            "namespace": meta.namespace,
+                            "ready": sum(1 for c in containers if c["ready"]),
+                            "desired": len(containers),
+                            "phase": status.phase,
+                        }
+                    )
+
+            # Sort by (namespace, name)
+            pods.sort(key=lambda pod: (pod["namespace"] or "", pod["name"] or ""))
+
+            return {
+                "success": True,
+                "pods": pods,
+                "total": len(pods),
+                "truncated": _list_was_truncated(pod_list),
+            }
+        except Exception as exc:
+            capture_service_error(
+                exc, logger=logger, integration="kubernetes", method="search_pods"
             )
             return {"success": False, "error": str(exc)}

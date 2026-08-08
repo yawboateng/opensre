@@ -15,7 +15,7 @@ from integrations.gcp.client import (
     describe_api_error,
 )
 from integrations.gcp.projects import group_projects, resolve_projects, resource_name_batches
-from integrations.gcp.tool_params import config_from, gcp_tool_params
+from integrations.gcp.tool_params import PROJECT_PROPERTY, config_from, gcp_tool_params
 from integrations.gcp.tools.gcp_logging_query_tool.entries import normalize_entries
 from integrations.gcp.tools.gcp_logging_query_tool.filters import build_filter
 
@@ -24,8 +24,10 @@ _COMPONENT = "integrations.gcp.tools.gcp_logging_query_tool"
 _ANTI_EXAMPLES = (
     "Do not pass a timestamp clause in filter — the time window comes from hours.",
     "Do not guess a project id; omit project for the default, or call gcp_list_projects.",
-    "Do not use for Kubernetes pod logs when a kubeconfig is available — "
-    "kubernetes_get_pod_logs is faster and does not need Cloud Logging permissions.",
+    "Do not use for live Kubernetes pod logs when the cluster is registered and "
+    "the pod still exists — kubernetes_get_pod_logs is faster and does not need "
+    "Cloud Logging permissions. Do use it when the pod is gone, the cluster is "
+    "not registered, or you need logs from before a restart.",
 )
 
 
@@ -45,8 +47,11 @@ _ANTI_EXAMPLES = (
         "Correlating a request id or trace across several GCP projects at once",
         "Reading Cloud Audit Log entries for a resource that changed before an incident",
         "Pulling GKE container logs when no kubeconfig is registered",
+        "Locating which cluster and namespace a workload runs in — GKE entries "
+        "carry cluster_name and namespace_name",
     ],
     anti_examples=list(_ANTI_EXAMPLES),
+    surfaces=("investigation", "action"),
     requires=[],
     input_schema={
         "type": "object",
@@ -58,14 +63,7 @@ _ANTI_EXAMPLES = (
                     'resource.type="k8s_container" AND jsonPayload.error!=""'
                 ),
             },
-            "project": {
-                "type": "string",
-                "description": (
-                    "Project id to query. Omit for the default project, pass a "
-                    "comma-separated list for several, or '*' for all configured "
-                    "projects. Call gcp_list_projects to discover valid values."
-                ),
-            },
+            "project": PROJECT_PROPERTY,
             "severity": {
                 "type": "string",
                 "description": (

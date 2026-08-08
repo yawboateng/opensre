@@ -57,8 +57,9 @@ def _failure(exc: Exception, detail: str, project: str, monitoring_filter: str) 
 _ANTI_EXAMPLES = (
     "Do not pass a metric display name; filter needs the metric type, "
     'e.g. metric.type="kubernetes.io/container/cpu/request_utilization".',
-    "Do not query more than one project per call — Cloud Monitoring lists time "
-    "series per project, unlike Cloud Logging.",
+    "Do not pass a list or '*' — this tool takes one metrics scope per call. "
+    "That is a call-shape limit, not a reach limit: a scoping project's series "
+    "already span every project it monitors.",
 )
 
 
@@ -67,7 +68,7 @@ _ANTI_EXAMPLES = (
     display_name="Cloud Monitoring",
     source="gcp",
     description=(
-        "Read Google Cloud Monitoring time series for one project. Supply a "
+        "Read Google Cloud Monitoring time series for one metrics scope. Supply a "
         "monitoring filter naming the metric type; returns aligned data points "
         "over the requested window."
     ),
@@ -92,8 +93,13 @@ _ANTI_EXAMPLES = (
             "project": {
                 "type": "string",
                 "description": (
-                    "Project id to query. Omit for the default project. Unlike "
-                    "gcp_logging_query this accepts a single project only."
+                    "Project id to query — a Cloud Monitoring metrics scope. One "
+                    "scope per call: unlike gcp_logging_query this takes no list "
+                    "and no '*'. A scope returns series for every project it "
+                    "monitors, so when metrics are centralised, pass the "
+                    "observability project and read resource_labels.project_id "
+                    "to see which project each series came from. Omit for the "
+                    "default project."
                 ),
             },
             "hours": {

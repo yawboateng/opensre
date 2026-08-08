@@ -28,7 +28,7 @@ from integrations.gcp.client import (
     describe_api_error,
 )
 from integrations.gcp.projects import group_projects, resolve_projects, resource_name_batches
-from integrations.gcp.tool_params import config_from, gcp_tool_params
+from integrations.gcp.tool_params import PROJECT_PROPERTY, config_from, gcp_tool_params
 from integrations.gcp.tools.gcp_audit_log_query_tool.filters import (
     LOG_TYPES,
     build_audit_filter,
@@ -84,14 +84,7 @@ _EMPTY_DATA_ACCESS_NOTE = (
                 "enum": sorted(LOG_TYPES),
                 "default": "activity",
             },
-            "project": {
-                "type": "string",
-                "description": (
-                    "Project id to query. Omit for the default project, pass a "
-                    "comma-separated list for several, or '*' for all configured "
-                    "projects. Call gcp_list_projects to discover valid values."
-                ),
-            },
+            "project": PROJECT_PROPERTY,
             "principal": {
                 "type": "string",
                 "description": (

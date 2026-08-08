@@ -1674,6 +1674,7 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "kubernetes_list_services",
         "kubernetes_list_statefulsets",
         "kubernetes_list_workloads",
+        "kubernetes_search_fleet",
     }
 )
 
