@@ -1131,9 +1131,15 @@ def test_every_fetchable_resource_is_read_only() -> None:
     assert verbs, "dispatch table is empty; this test would pass vacuously"
     # Allow both "read_" (typed clients) and "get_" (custom objects API)
     read_only_verbs = [verb for verb in verbs if verb.startswith(("read_", "get_"))]
-    assert len(read_only_verbs) == len(verbs), f"Non-read-only verbs found: {sorted(verbs - set(read_only_verbs))}"
+    assert len(read_only_verbs) == len(verbs), (
+        f"Non-read-only verbs found: {sorted(verbs - set(read_only_verbs))}"
+    )
     # Explicit negative check for dangerous verbs
-    dangerous_verbs = [v for v in verbs if v.startswith(("create_", "patch_", "delete_", "replace_", "post_", "put_"))]
+    dangerous_verbs = [
+        v
+        for v in verbs
+        if v.startswith(("create_", "patch_", "delete_", "replace_", "post_", "put_"))
+    ]
     assert not dangerous_verbs, f"Dangerous verbs found: {sorted(dangerous_verbs)}"
 
 
@@ -1477,7 +1483,9 @@ def test_list_workloads_degrades_when_the_rollouts_crd_is_absent() -> None:
     mock_batch.list_namespaced_cron_job.return_value = empty_list
 
     # Rollouts CRD is absent (404)
-    mock_custom.list_namespaced_custom_object.side_effect = ApiException(status=404, reason="Not Found")
+    mock_custom.list_namespaced_custom_object.side_effect = ApiException(
+        status=404, reason="Not Found"
+    )
 
     client = _make_client_with_apis(apps=mock_apps, batch=mock_batch, custom=mock_custom)
 
@@ -1527,7 +1535,9 @@ def test_list_workloads_files_no_sentry_error_for_an_absent_crd() -> None:
             if should_report:
                 assert len(captured_errors) > 0, f"Status {status} should trigger error reporting"
             else:
-                assert len(captured_errors) == 0, f"Status {status} should not trigger error reporting"
+                assert len(captured_errors) == 0, (
+                    f"Status {status} should not trigger error reporting"
+                )
 
 
 def test_list_workloads_reports_truncation_honestly() -> None:
@@ -1586,36 +1596,37 @@ def test_new_listers_keep_credentials_injected_and_selectors_model_facing() -> N
 
 def test_model_cannot_override_cluster_configs_on_list_workloads() -> None:
     """Test that model cannot override cluster_configs via malicious input."""
-    # Exactly like test_model_cannot_override_cluster_configs_via_tool_input
-    agent_state = mock_agent_state()
-    agent_state.sources = {
-        "kubernetes": {
-            "kubeconfig_path": "/trusted/config",
-            "context": "trusted-context",
-        }
-    }
+    from core.execution import execute_tool_calls
+    from core.llm.types import ToolCall
+    from core.tool_framework.registered_tool import RegisteredTool
 
-    # Malicious tool call tries to override cluster_configs
-    tool_call = ToolCall(
-        id="tc-1",
-        name="kubernetes_list_workloads",
-        input={
-            "cluster_configs": {
-                "evil": {
-                    "kubeconfig_path": "/evil/config",
-                    "context": "evil-context",
-                }
-            },
-            "namespace": "default",
+    # Exactly like test_model_cannot_override_cluster_configs_via_tool_input
+    resolved = {
+        "kubernetes": {"kubeconfig_path": "/trusted/config", "context": "trusted-context"},
+        "_all_kubernetes_instances": [
+            {"name": "default", "tags": {}, "config": {"kubeconfig_path": "/trusted/config"}},
+        ],
+    }
+    malicious_input = {
+        "cluster_configs": {
+            "evil": {
+                "kubeconfig_path": "/evil/config",
+                "context": "evil-context",
+            }
         },
-    )
+        "namespace": "default",
+    }
 
     with patch("integrations.kubernetes.tools._make_client") as mock_make:
         mock_client = MagicMock()
         mock_client.list_workloads.return_value = {"success": True, "workloads": [], "total": 0}
         mock_make.return_value = mock_client
 
-        execute_tool_calls(agent_state, [tool_call])
+        execute_tool_calls(
+            [ToolCall(id="c1", name="kubernetes_list_workloads", input=malicious_input)],
+            [RegisteredTool.from_base_tool(KubernetesListWorkloadsTool())],
+            resolved,
+        )
 
         # Should have been called with trusted config, not evil config
         call_args = mock_make.call_args[0][0]
@@ -1694,11 +1705,7 @@ def test_list_rollouts_surfaces_a_degraded_rollout() -> None:
         "spec": {
             "replicas": 2,
             "paused": True,
-            "strategy": {
-                "canary": {
-                    "steps": [{"setWeight": 20}, {"pause": {}}]
-                }
-            }
+            "strategy": {"canary": {"steps": [{"setWeight": 20}, {"pause": {}}]}},
         },
         "status": {
             "phase": "Progressing",
@@ -1709,16 +1716,11 @@ def test_list_rollouts_surfaces_a_degraded_rollout() -> None:
             "currentStepIndex": 1,
             "currentPodHash": "new-hash-123",
             "stableRS": "old-hash-456",
-            "pauseConditions": [
-                {"reason": "BlueGreenPause", "startTime": "2023-01-01T00:05:00Z"}
-            ],
+            "pauseConditions": [{"reason": "BlueGreenPause", "startTime": "2023-01-01T00:05:00Z"}],
         },
     }
 
-    rollout_response = {
-        "items": [rollout_item],
-        "metadata": {}
-    }
+    rollout_response = {"items": [rollout_item], "metadata": {}}
     mock_custom.list_namespaced_custom_object.return_value = rollout_response
 
     client = _make_client_with_apis(custom=mock_custom)
