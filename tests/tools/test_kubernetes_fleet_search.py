@@ -1,660 +1,801 @@
-"""Tests for the Kubernetes fleet search tool."""
+"""Tests for ``kubernetes_search_fleet`` and its two client methods.
+
+Two layers are covered deliberately:
+
+* the **tool** (`KubernetesSearchFleetTool.run`) — fan-out, deadline, bucket
+  discipline, payload shape — with the per-cluster helpers faked;
+* the **client** (`KubernetesClient.search_workload_owners` / `search_pods`) —
+  namespace selection, truncation derivation and CRD degradation — with the
+  Kubernetes API objects faked.
+
+Patch targets are `integrations.kubernetes.tools.fleet_search.*`, never the
+package attribute: the submodule binds `_resolve_client` into its own namespace
+at import, so patching `integrations.kubernetes.tools._resolve_client` would
+leave this tool untouched and the test would pass vacuously.
+"""
+
+from __future__ import annotations
 
 import time
+from http import HTTPStatus
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
+from kubernetes.client.rest import ApiException
 
 from integrations.kubernetes.tools.fleet_search import (
     KubernetesSearchFleetTool,
     _search_one_cluster_pods,
     _search_one_cluster_workloads,
 )
+from tests.tools.test_kubernetes_tools import _MINIMAL_KUBECONFIG, _make_client_with_apis
+
+_MATCH_KEYS = {"cluster", "namespace", "kind", "name", "ready", "desired", "phase"}
 
 
-class TestKubernetesFleetSearch:
-    """Test the Kubernetes fleet search tool."""
+def _conn(namespace: str = "default") -> dict[str, Any]:
+    """A connection map that would really build a client."""
+    return {
+        "kubeconfig": _MINIMAL_KUBECONFIG,
+        "kubeconfig_path": "",
+        "context": "",
+        "namespace": namespace,
+    }
 
-    def setup_method(self):
-        """Set up each test."""
-        self.tool = KubernetesSearchFleetTool()
 
-    def test_unavailable_when_not_configured(self):
-        """Tool returns unavailable when kubernetes not configured."""
-        with patch(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            return_value=False,
-        ):
-            result = self.tool.run(name_contains="test")
+def _ok(
+    cluster: str,
+    matches: list[dict[str, Any]] | None = None,
+    *,
+    truncated_kinds: list[str] | None = None,
+    unavailable_kinds: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """A successful per-cluster helper result in the helper's real shape."""
+    return {
+        "success": True,
+        "matches": [{"cluster": cluster, **row} for row in (matches or [])],
+        "truncated_kinds": truncated_kinds or [],
+        "unavailable_kinds": unavailable_kinds or [],
+    }
 
-        assert result["source"] == "kubernetes"
-        assert result["available"] is False
-        assert "error" in result
 
-    def test_single_cluster_success(self, monkeypatch):
-        """Search a single cluster successfully."""
-        # Mock _is_available
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+def _row(name: str, *, kind: str = "Deployment", namespace: str = "prod") -> dict[str, Any]:
+    return {
+        "namespace": namespace,
+        "kind": kind,
+        "name": name,
+        "ready": 1,
+        "desired": 1,
+        "phase": None,
+    }
 
-        # Mock cluster resolution
-        mock_client = MagicMock()
-        mock_conn = {"cluster_name": "test-cluster"}
 
-        def _mock_resolve_client(cluster_name, configs, default_conn):
-            if cluster_name == "test-cluster":
-                return mock_client, mock_conn, None
-            return None, None, "unknown cluster"
+@pytest.fixture
+def tool() -> KubernetesSearchFleetTool:
+    return KubernetesSearchFleetTool()
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._resolve_client",
-            _mock_resolve_client,
-        )
 
-        # Mock search functions
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [
-                    {
-                        "cluster": cluster_name,
-                        "namespace": "default",
-                        "kind": "Deployment",
-                        "name": "test-deployment",
-                    }
-                ],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+@pytest.fixture
+def available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._is_available", lambda _sources: True
+    )
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
 
-        result = self.tool.run(
-            name_contains="test",
-            cluster="test-cluster",
-            cluster_configs={"test-cluster": mock_conn},
-        )
+def _patch_workloads(monkeypatch: pytest.MonkeyPatch, fn: Any) -> None:
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads", fn
+    )
 
-        assert result["source"] == "kubernetes"
-        assert result["available"] is True
-        assert result["total"] == 1
-        assert len(result["matches"]) == 1
-        assert result["matches"][0]["name"] == "test-deployment"
-        assert result["clusters_searched"] == ["test-cluster"]
-        assert result["clusters_failed"] == []
-        assert result["partial"] is False
-        assert result["pods_searched"] is False
 
-    def test_unknown_cluster_error(self, monkeypatch):
-        """Tool returns error for unknown cluster."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+def _patch_pods(monkeypatch: pytest.MonkeyPatch, fn: Any) -> None:
+    monkeypatch.setattr("integrations.kubernetes.tools.fleet_search._search_one_cluster_pods", fn)
 
-        def _mock_resolve_client(cluster_name, configs, default_conn):
-            return None, None, f"unknown cluster '{cluster_name}'"
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._resolve_client",
-            _mock_resolve_client,
-        )
+# ---------------------------------------------------------------------------
+# Tool: availability and cluster selection
+# ---------------------------------------------------------------------------
 
-        result = self.tool.run(
-            name_contains="test",
-            cluster="unknown-cluster",
-            cluster_configs={},
-        )
 
-        assert result["available"] is False
-        assert "unknown cluster" in result["error"]
+def test_unavailable_when_no_kubeconfig(tool: KubernetesSearchFleetTool) -> None:
+    """No kubeconfig at all is a tool-level unavailable, not an empty result."""
+    result = tool.run(name_contains="anything")
 
-    def test_multi_cluster_success(self, monkeypatch):
-        """Search multiple clusters successfully."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+    assert result["available"] is False
+    assert "error" in result
 
-        # Mock search functions to return different results per cluster
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            if cluster_name == "cluster-a":
-                return {
-                    "success": True,
-                    "matches": [
-                        {
-                            "cluster": cluster_name,
-                            "namespace": "default",
-                            "kind": "Deployment",
-                            "name": "app-a",
-                        }
-                    ],
-                    "unavailable_kinds": [],
-                    "truncated": False,
-                }
-            elif cluster_name == "cluster-b":
-                return {
-                    "success": True,
-                    "matches": [
-                        {
-                            "cluster": cluster_name,
-                            "namespace": "prod",
-                            "kind": "StatefulSet",
-                            "name": "db-b",
-                        }
-                    ],
-                    "unavailable_kinds": [],
-                    "truncated": False,
-                }
-            return {"success": True, "matches": [], "unavailable_kinds": [], "truncated": False}
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
+def test_an_unknown_cluster_name_lists_the_valid_ones(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 15.
 
-        configs = {
-            "cluster-a": {"cluster_name": "cluster-a"},
-            "cluster-b": {"cluster_name": "cluster-b"},
-        }
+    ``_resolve_client`` is deliberately NOT patched: the point is that the real
+    resolver's contract survives the fan-out wrapper. A silent fallback to the
+    default cluster would search the wrong place and report success.
+    """
+    searched: list[str] = []
 
-        result = self.tool.run(
-            name_contains="app",
-            cluster_configs=configs,
-        )
+    def _record(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        searched.append(cluster_name)
+        return _ok(cluster_name)
 
-        assert result["source"] == "kubernetes"
-        assert result["available"] is True
-        assert result["total"] == 2
-        assert len(result["matches"]) == 2
-        assert sorted(result["clusters_searched"]) == ["cluster-a", "cluster-b"]
-        assert result["clusters_failed"] == []
-        assert result["partial"] is False
+    _patch_workloads(monkeypatch, _record)
 
-        # Check sorting: cluster-a should come before cluster-b
-        assert result["matches"][0]["cluster"] == "cluster-a"
-        assert result["matches"][1]["cluster"] == "cluster-b"
+    result = tool.run(
+        name_contains="svc",
+        cluster="nope",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn(), "gke-b": _conn()},
+    )
 
-    def test_partial_cluster_failure(self, monkeypatch):
-        """Handle partial cluster failures correctly."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+    assert result["available"] is False
+    assert "nope" in result["error"]
+    assert "gke-a" in result["error"] and "gke-b" in result["error"]
+    assert searched == []
 
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            if cluster_name == "good-cluster":
-                return {
-                    "success": True,
-                    "matches": [
-                        {
-                            "cluster": cluster_name,
-                            "namespace": "default",
-                            "kind": "Deployment",
-                            "name": "working-app",
-                        }
-                    ],
-                    "unavailable_kinds": [],
-                    "truncated": False,
-                }
-            elif cluster_name == "bad-cluster":
-                return {
-                    "success": False,
-                    "error": "connection refused",
-                    "matches": [],
-                    "unavailable_kinds": [],
-                    "truncated": False,
-                }
-            return {"success": True, "matches": [], "unavailable_kinds": [], "truncated": False}
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
+# ---------------------------------------------------------------------------
+# Tool: the D7 trap
+# ---------------------------------------------------------------------------
 
-        configs = {
-            "good-cluster": {"cluster_name": "good-cluster"},
-            "bad-cluster": {"cluster_name": "bad-cluster"},
-        }
 
-        result = self.tool.run(
-            name_contains="app",
-            cluster_configs=configs,
-        )
+def test_search_covers_every_namespace_not_the_configured_default(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 6 / D7.
 
-        assert result["total"] == 1
-        assert result["clusters_searched"] == ["good-cluster"]
-        assert len(result["clusters_failed"]) == 1
-        assert result["clusters_failed"][0]["cluster"] == "bad-cluster"
-        assert result["clusters_failed"][0]["reason"] == "connection refused"
-        assert result["partial"] is True
+    Every auto-registered cluster stores ``namespace: "default"``. Routing the
+    empty argument through ``_effective_namespace`` would search one usually
+    empty namespace per cluster and return a confident fleet-wide zero.
+    """
+    seen: list[tuple[str, str]] = []
 
-    def test_two_phase_heuristic_pods_triggered(self, monkeypatch):
-        """Test that pod search is triggered when no workload owners found."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+    def _record(cluster_name: str, _conn_map: Any, _needle: str, namespace: str) -> dict[str, Any]:
+        seen.append((cluster_name, namespace))
+        return _ok(cluster_name)
 
-        # Mock workload search to return empty
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+    _patch_workloads(monkeypatch, _record)
+    _patch_pods(monkeypatch, lambda *_a: {"success": True, "matches": [], "truncated_kinds": []})
 
-        # Mock pod search to return results
-        def _mock_search_pods(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [
-                    {
-                        "cluster": cluster_name,
-                        "namespace": "default",
-                        "kind": "Pod",
-                        "name": "orphan-pod",
-                    }
-                ],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+    tool.run(
+        name_contains="svc",
+        namespace="",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        default_namespace="default",
+        cluster_configs={"gke-a": _conn("default"), "gke-b": _conn("kube-system")},
+    )
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_pods",
-            _mock_search_pods,
-        )
+    assert sorted(seen) == [("gke-a", ""), ("gke-b", "")]
 
-        result = self.tool.run(
-            name_contains="orphan",
-            cluster_configs={"test": {"cluster_name": "test"}},
-        )
 
-        assert result["total"] == 1
-        assert result["matches"][0]["kind"] == "Pod"
-        assert result["pods_searched"] is True
+def test_an_explicit_namespace_is_still_honoured(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The D7 avoidance must not become "ignore the namespace argument"."""
+    seen: list[str] = []
 
-    def test_include_pods_forces_pod_search(self, monkeypatch):
-        """Test that include_pods=True forces pod search even with workload matches."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+    def _record(cluster_name: str, _conn_map: Any, _needle: str, namespace: str) -> dict[str, Any]:
+        seen.append(namespace)
+        return _ok(cluster_name, [_row("svc-api", namespace="payments")])
 
-        # Mock workload search to return results
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [
-                    {
-                        "cluster": cluster_name,
-                        "namespace": "default",
-                        "kind": "Deployment",
-                        "name": "test-deployment",
-                    }
-                ],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+    _patch_workloads(monkeypatch, _record)
 
-        # Mock pod search to return additional results
-        def _mock_search_pods(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [
-                    {
-                        "cluster": cluster_name,
-                        "namespace": "default",
-                        "kind": "Pod",
-                        "name": "test-pod",
-                    }
-                ],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+    tool.run(
+        name_contains="svc",
+        namespace="  payments  ",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn("default")},
+    )
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_pods",
-            _mock_search_pods,
-        )
+    assert seen == ["payments"]
 
-        result = self.tool.run(
-            name_contains="test",
-            include_pods=True,
-            cluster_configs={"test": {"cluster_name": "test"}},
-        )
 
-        assert result["total"] == 2
-        assert result["pods_searched"] is True
-        # Should have both deployment and pod
-        kinds = {match["kind"] for match in result["matches"]}
-        assert kinds == {"Deployment", "Pod"}
+# ---------------------------------------------------------------------------
+# Tool: deadline and bucket discipline
+# ---------------------------------------------------------------------------
 
-    def test_deadline_timeout(self, monkeypatch):
-        """Test that deadline timeout is handled correctly."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
 
-        # Mock search to take longer than deadline
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            time.sleep(2)  # Longer than the mocked deadline
-            return {
-                "success": True,
-                "matches": [],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+def test_a_timed_out_cluster_is_reported_not_dropped(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 7. A slow cluster must never read as "searched, nothing found"."""
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
+    def _slow(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        time.sleep(3.0)
+        return _ok(cluster_name)
 
-        # Mock a very short deadline
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._FLEET_SEARCH_DEADLINE_SECONDS",
-            0.1,
-        )
+    _patch_workloads(monkeypatch, _slow)
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._FLEET_SEARCH_DEADLINE_SECONDS", 0.1
+    )
 
-        result = self.tool.run(
-            name_contains="test",
-            cluster_configs={"slow-cluster": {"cluster_name": "slow-cluster"}},
-        )
+    result = tool.run(
+        name_contains="svc",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"slow": _conn()},
+    )
 
-        assert len(result["clusters_failed"]) == 1
-        assert "deadline exceeded" in result["clusters_failed"][0]["reason"]
-        assert result["partial"] is True
+    assert result["clusters_searched"] == []
+    assert result["clusters_failed"] == [{"cluster": "slow", "reason": "search deadline exceeded"}]
+    assert result["partial"] is True
 
-    def test_truncation_reporting(self, monkeypatch):
-        """Test that truncation is reported correctly."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
 
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [
-                    {
-                        "cluster": cluster_name,
-                        "namespace": "default",
-                        "kind": "Deployment",
-                        "name": "test-deployment",
-                    }
-                ],
-                "unavailable_kinds": [],
-                "truncated": True,  # Mark as truncated
-            }
+def test_the_deadline_returns_without_joining_a_wedged_worker(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline is a wall-clock budget, not a label on a result.
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
+    ``shutdown(wait=False, cancel_futures=True)`` cannot interrupt a thread
+    already inside a socket read, so the only thing that keeps the turn alive is
+    *not waiting* for it. Turning the shutdown into a blocking join reintroduces
+    the multi-minute hang the deadline exists to prevent, and no assertion on
+    the payload can see it — only the clock can.
+    """
+    wedged = 3.0
 
-        result = self.tool.run(
-            name_contains="test",
-            cluster_configs={"test-cluster": {"cluster_name": "test-cluster"}},
-        )
+    def _wedged(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        time.sleep(wedged)
+        return _ok(cluster_name)
 
-        assert result["truncated"] is True
-        assert "test-cluster" in result["truncated_kinds"]
-        assert result["partial"] is True
+    _patch_workloads(monkeypatch, _wedged)
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._FLEET_SEARCH_DEADLINE_SECONDS", 0.1
+    )
 
-    def test_unavailable_kinds_collection(self, monkeypatch):
-        """Test that unavailable kinds are collected correctly."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+    started = time.monotonic()
+    result = tool.run(
+        name_contains="svc",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"wedged": _conn()},
+    )
+    elapsed = time.monotonic() - started
 
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [],
-                "unavailable_kinds": [
-                    {"cluster": cluster_name, "kind": "Rollout", "reason": "CRD not installed"}
-                ],
-                "truncated": False,
-            }
+    assert result["partial"] is True
+    # Generous margin: the deadline is 0.1s and the worker sleeps 3s, so any
+    # join at all lands well past 1.5s.
+    assert elapsed < 1.5, f"run() joined the wedged worker: {elapsed:.2f}s"
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
 
-        result = self.tool.run(
-            name_contains="test",
-            cluster_configs={"test-cluster": {"cluster_name": "test-cluster"}},
-        )
+def test_every_selected_cluster_appears_in_exactly_one_bucket(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 8. The anti-silent-drop invariant, independent of failure kind."""
+    selected = {"ok": _conn(), "boom": _conn(), "slow": _conn(), "raiser": _conn()}
 
-        assert len(result["unavailable_kinds"]) == 1
-        assert result["unavailable_kinds"][0]["kind"] == "Rollout"
-
-    def test_phase2_failure_moves_cluster_to_failed(self, monkeypatch):
-        """Test that phase 2 failure moves cluster from searched to failed."""
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
-
-        # Mock workload search to succeed and return empty (triggering phase 2)
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
-
-        # Mock pod search to fail
-        def _mock_search_pods(cluster_name, cluster_conn, name_contains, namespace):
+    def _mixed(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        if cluster_name == "boom":
             return {
                 "success": False,
-                "error": "pod listing failed",
+                "error": "(500) Reason: Internal Server Error",
                 "matches": [],
+                "truncated_kinds": [],
                 "unavailable_kinds": [],
-                "truncated": False,
             }
+        if cluster_name == "slow":
+            time.sleep(3.0)
+        if cluster_name == "raiser":
+            raise RuntimeError("worker exploded")
+        return _ok(cluster_name, [_row("svc-api")])
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_pods",
-            _mock_search_pods,
-        )
+    _patch_workloads(monkeypatch, _mixed)
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._FLEET_SEARCH_DEADLINE_SECONDS", 0.5
+    )
 
-        result = self.tool.run(
-            name_contains="test",
-            cluster_configs={"test-cluster": {"cluster_name": "test-cluster"}},
-        )
+    result = tool.run(name_contains="svc", kubeconfig=_MINIMAL_KUBECONFIG, cluster_configs=selected)
 
-        assert result["clusters_searched"] == []
-        assert len(result["clusters_failed"]) == 1
-        assert result["clusters_failed"][0]["cluster"] == "test-cluster"
-        assert "pod listing failed" in result["clusters_failed"][0]["reason"]
-        assert result["pods_searched"] is True
+    searched = set(result["clusters_searched"])
+    failed = {entry["cluster"] for entry in result["clusters_failed"]}
+    assert searched.isdisjoint(failed)
+    assert searched | failed == set(selected)
+    assert len(result["clusters_searched"]) + len(result["clusters_failed"]) == len(selected)
+    assert result["partial"] is True
 
-    def test_search_covers_every_namespace_not_the_configured_default(self, monkeypatch):
-        """Test that search covers all namespaces, not the configured default.
 
-        This pins the D7 avoidance - the most dangerous silent failure.
-        """
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._is_available",
-            lambda _: True,
-        )
+def test_a_phase_two_failure_moves_the_cluster_out_of_searched(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pod-listing failure is a cluster failure, not a silent empty result."""
+    _patch_workloads(monkeypatch, lambda cname, *_a: _ok(cname))
+    _patch_pods(
+        monkeypatch,
+        lambda _cname, *_a: {
+            "success": False,
+            "error": "(403) Reason: Forbidden",
+            "matches": [],
+            "truncated_kinds": [],
+        },
+    )
 
-        # Mock search functions to verify they receive empty namespace
-        search_workloads_calls = []
+    result = tool.run(
+        name_contains="svc", kubeconfig=_MINIMAL_KUBECONFIG, cluster_configs={"gke-a": _conn()}
+    )
 
-        def _mock_search_workloads(cluster_name, cluster_conn, name_contains, namespace):
-            search_workloads_calls.append((cluster_name, namespace))
-            return {
-                "success": True,
-                "matches": [],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+    assert result["clusters_searched"] == []
+    assert result["clusters_failed"] == [{"cluster": "gke-a", "reason": "(403) Reason: Forbidden"}]
+    assert result["pods_searched"] is True
+    assert result["partial"] is True
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_workloads",
-            _mock_search_workloads,
-        )
 
-        # Mock search pods since phase 1 returns empty
-        def _mock_search_pods(cluster_name, cluster_conn, name_contains, namespace):
-            return {
-                "success": True,
-                "matches": [],
-                "unavailable_kinds": [],
-                "truncated": False,
-            }
+# ---------------------------------------------------------------------------
+# Tool: the two-phase heuristic
+# ---------------------------------------------------------------------------
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._search_one_cluster_pods",
-            _mock_search_pods,
-        )
 
-        configs = {
-            "cluster-a": {"cluster_name": "cluster-a", "namespace": "default"},
-            "cluster-b": {"cluster_name": "cluster-b", "namespace": "production"},
+def test_pods_are_searched_only_when_no_owner_matches(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 11. Phase 2 lists whole clusters, so it must stay rare."""
+    pod_calls: list[str] = []
+
+    def _pods(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        pod_calls.append(cluster_name)
+        return {"success": True, "matches": [], "truncated_kinds": []}
+
+    _patch_pods(monkeypatch, _pods)
+
+    # (a) an owner matches -> phase 2 never runs
+    _patch_workloads(monkeypatch, lambda cname, *_a: _ok(cname, [_row("svc-api")]))
+    hit = tool.run(
+        name_contains="svc-api",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn()},
+    )
+    assert pod_calls == []
+    assert hit["pods_searched"] is False
+
+    # (b) nothing matches anywhere -> phase 2 runs
+    _patch_workloads(monkeypatch, lambda cname, *_a: _ok(cname))
+    miss = tool.run(
+        name_contains="svc-api",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn()},
+    )
+    assert pod_calls == ["gke-a"]
+    assert miss["pods_searched"] is True
+
+
+def test_include_pods_forces_phase_two_even_when_an_owner_matches(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_workloads(monkeypatch, lambda cname, *_a: _ok(cname, [_row("svc-api")]))
+    _patch_pods(
+        monkeypatch,
+        lambda cname, *_a: {
+            "success": True,
+            "matches": [{"cluster": cname, **_row("svc-api-6c8f-2xq", kind="Pod")}],
+            "truncated_kinds": [],
+        },
+    )
+
+    result = tool.run(
+        name_contains="svc-api",
+        include_pods=True,
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn()},
+    )
+
+    assert result["pods_searched"] is True
+    assert {match["kind"] for match in result["matches"]} == {"Deployment", "Pod"}
+
+
+def test_a_full_pod_name_with_a_replicaset_hash_is_found(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 12.
+
+    No owner name *contains* ``svc-api-6c8f9d7b4-2xqlp``, so phase 1 returns a
+    fleet-wide zero and phase 2 has to self-heal. This is the property that
+    makes replicaset-hash stripping unnecessary.
+    """
+    needle = "svc-api-6c8f9d7b4-2xqlp"
+
+    def _owners(cluster_name: str, _conn_map: Any, name_contains: str, _ns: str) -> dict[str, Any]:
+        rows = [_row("svc-api")] if name_contains.lower() in "svc-api" else []
+        return _ok(cluster_name, rows)
+
+    def _pods(cluster_name: str, _conn_map: Any, name_contains: str, _ns: str) -> dict[str, Any]:
+        rows = [_row(needle, kind="Pod")] if name_contains in needle else []
+        return {
+            "success": True,
+            "matches": [{"cluster": cluster_name, **row} for row in rows],
+            "truncated_kinds": [],
         }
 
-        # Call with empty namespace argument (search all namespaces)
-        self.tool.run(
-            name_contains="test",
-            namespace="",  # Empty - should search all namespaces
-            cluster_configs=configs,
-        )
+    _patch_workloads(monkeypatch, _owners)
+    _patch_pods(monkeypatch, _pods)
 
-        # Verify that search functions were called with empty namespace
-        assert len(search_workloads_calls) == 2
-        for _cluster_name, namespace_arg in search_workloads_calls:
-            assert namespace_arg == ""  # Should be empty, not the cluster's default
+    result = tool.run(
+        name_contains=needle,
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn()},
+    )
 
-
-class TestSearchWorkloadsFunction:
-    """Test the _search_one_cluster_workloads function."""
-
-    def test_workload_search_success(self, monkeypatch):
-        """Test successful workload search."""
-        mock_client = MagicMock()
-
-        def _mock_resolve_client(cluster_name, configs, default_conn):
-            return mock_client, {"cluster_name": cluster_name}, None
-
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._resolve_client",
-            _mock_resolve_client,
-        )
-
-        # Mock search_workload_owners
-        def _mock_search_workload_owners(client, name_contains, namespace):
-            return [
-                {
-                    "name": "test-deployment",
-                    "namespace": "default",
-                    "kind": "Deployment",
-                    "created_at": "2023-01-01T00:00:00Z",
-                }
-            ]
-
-        monkeypatch.setattr(
-            "integrations.kubernetes.client.search_workload_owners",
-            _mock_search_workload_owners,
-        )
-
-        result = _search_one_cluster_workloads("test-cluster", {}, "test", "")
-
-        assert result["success"] is True
-        assert len(result["matches"]) == 1
-        assert result["matches"][0]["name"] == "test-deployment"
-        assert result["matches"][0]["cluster"] == "test-cluster"
-
-    def test_workload_search_api_error(self, monkeypatch):
-        """Test workload search with API error."""
-
-        def _mock_resolve_client(cluster_name, configs, default_conn):
-            return None, None, "connection failed"
-
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._resolve_client",
-            _mock_resolve_client,
-        )
-
-        result = _search_one_cluster_workloads("bad-cluster", {}, "test", "")
-
-        assert result["success"] is False
-        assert "connection failed" in result["error"]
+    assert result["pods_searched"] is True
+    assert [match["name"] for match in result["matches"]] == [needle]
 
 
-class TestSearchPodsFunction:
-    """Test the _search_one_cluster_pods function."""
+# ---------------------------------------------------------------------------
+# Tool: payload discipline
+# ---------------------------------------------------------------------------
 
-    def test_pod_search_success(self, monkeypatch):
-        """Test successful pod search."""
-        mock_client = MagicMock()
 
-        def _mock_resolve_client(cluster_name, configs, default_conn):
-            return mock_client, {"cluster_name": cluster_name}, None
+def test_matches_carry_no_labels_or_raw_objects(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 14. The client's row projectors emit more than the tool returns."""
+    fat_row = {
+        **_row("svc-api"),
+        "labels": {"app": "svc-api"},
+        "creation_timestamp": "2024-01-01T00:00:00Z",
+        "containers": [{"name": "app", "image": "registry/app:1"}],
+    }
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._resolve_client",
-            _mock_resolve_client,
-        )
+    def _fat(cluster_name: str, *_args: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "matches": [
+                _search_one_cluster_workloads.__globals__["_project_match"](cluster_name, fat_row)
+            ],
+            "truncated_kinds": [],
+            "unavailable_kinds": [],
+        }
 
-        # Mock search_pods
-        def _mock_search_pods(client, name_contains, namespace):
-            return [
-                {
-                    "name": "test-pod",
-                    "namespace": "default",
-                    "created_at": "2023-01-01T00:00:00Z",
-                }
-            ]
+    _patch_workloads(monkeypatch, _fat)
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.client.search_pods",
-            _mock_search_pods,
-        )
+    result = tool.run(
+        name_contains="svc", kubeconfig=_MINIMAL_KUBECONFIG, cluster_configs={"gke-a": _conn()}
+    )
 
-        result = _search_one_cluster_pods("test-cluster", {}, "test", "")
+    assert result["matches"], "expected a match to inspect"
+    for match in result["matches"]:
+        assert set(match) == _MATCH_KEYS
 
-        assert result["success"] is True
-        assert len(result["matches"]) == 1
-        assert result["matches"][0]["name"] == "test-pod"
-        assert result["matches"][0]["cluster"] == "test-cluster"
-        assert result["matches"][0]["kind"] == "Pod"
 
-    def test_pod_search_api_error(self, monkeypatch):
-        """Test pod search with API error."""
+def test_truncation_is_reported_per_kind_and_sets_partial(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``truncated_kinds`` names kinds, deduped across clusters — not cluster names."""
+    _patch_workloads(
+        monkeypatch,
+        lambda cname, *_a: _ok(cname, [_row("svc-api")], truncated_kinds=["Deployment"]),
+    )
 
-        def _mock_resolve_client(cluster_name, configs, default_conn):
-            return None, None, "connection failed"
+    result = tool.run(
+        name_contains="svc",
+        kubeconfig=_MINIMAL_KUBECONFIG,
+        cluster_configs={"gke-a": _conn(), "gke-b": _conn()},
+    )
 
-        monkeypatch.setattr(
-            "integrations.kubernetes.tools.fleet_search._resolve_client",
-            _mock_resolve_client,
-        )
+    assert result["truncated"] is True
+    assert result["truncated_kinds"] == ["Deployment"]
+    assert result["partial"] is True
 
-        result = _search_one_cluster_pods("bad-cluster", {}, "test", "")
 
-        assert result["success"] is False
-        assert "connection failed" in result["error"]
+def test_an_absent_crd_degrades_the_kind_and_keeps_the_answer_complete(
+    tool: KubernetesSearchFleetTool, available: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan test 9 at the tool layer.
+
+    "There are no Rollouts here" is a complete answer, so the cluster stays in
+    ``clusters_searched`` and ``partial`` stays false.
+    """
+    _patch_workloads(
+        monkeypatch,
+        lambda cname, *_a: _ok(
+            cname,
+            [_row("svc-api")],
+            unavailable_kinds=[
+                {"cluster": cname, "kind": "Rollout", "reason": "Kubernetes API error 404"}
+            ],
+        ),
+    )
+
+    result = tool.run(
+        name_contains="svc", kubeconfig=_MINIMAL_KUBECONFIG, cluster_configs={"gke-a": _conn()}
+    )
+
+    assert result["clusters_searched"] == ["gke-a"]
+    assert result["clusters_failed"] == []
+    assert result["partial"] is False
+    assert result["unavailable_kinds"] == [
+        {"cluster": "gke-a", "kind": "Rollout", "reason": "Kubernetes API error 404"}
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The per-cluster helpers
+# ---------------------------------------------------------------------------
+
+
+def test_a_client_that_cannot_be_built_reports_the_resolver_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason must survive.
+
+    Collapsing every build failure into one generic string destroys the only
+    thing an operator can act on.
+    """
+
+    def _refuse(_cluster: str, _configs: Any, _default: Any) -> tuple[None, dict[str, Any], str]:
+        return None, {}, "connection failed: no credentials for this cluster"
+
+    monkeypatch.setattr("integrations.kubernetes.tools.fleet_search._resolve_client", _refuse)
+
+    workloads = _search_one_cluster_workloads("gke-a", {}, "svc", "")
+    pods = _search_one_cluster_pods("gke-a", {}, "svc", "")
+
+    assert workloads["success"] is False
+    assert "connection failed" in workloads["error"]
+    assert pods["success"] is False
+    assert "connection failed" in pods["error"]
+
+
+def test_the_helpers_project_the_clients_rows_onto_the_match_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helpers speak the *client's* contract, and drop everything else."""
+    client = MagicMock()
+    client.search_workload_owners.return_value = {
+        "success": True,
+        "workloads": [
+            {
+                "kind": "Deployment",
+                "name": "svc-api",
+                "namespace": "payments",
+                "desired": 3,
+                "ready": 2,
+                "phase": None,
+                "labels": {"app": "svc-api"},
+            }
+        ],
+        "truncated": True,
+        "truncated_kinds": ["Deployment"],
+        "unavailable_kinds": [{"kind": "Rollout", "reason": "Kubernetes API error 404"}],
+    }
+    client.search_pods.return_value = {
+        "success": True,
+        "pods": [
+            {
+                "kind": "Pod",
+                "name": "svc-api-6c8f-2xq",
+                "namespace": "payments",
+                "ready": 1,
+                "desired": 1,
+                "phase": "Running",
+                "node": "node-1",
+            }
+        ],
+        "truncated": True,
+    }
+
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._resolve_client",
+        lambda _cluster, _configs, conn: (client, conn, None),
+    )
+
+    workloads = _search_one_cluster_workloads("gke-a", {}, "svc", "")
+    assert workloads["success"] is True
+    assert set(workloads["matches"][0]) == _MATCH_KEYS
+    assert workloads["matches"][0]["cluster"] == "gke-a"
+    assert workloads["matches"][0]["namespace"] == "payments"
+    assert workloads["truncated_kinds"] == ["Deployment"]
+    assert workloads["unavailable_kinds"] == [
+        {"cluster": "gke-a", "kind": "Rollout", "reason": "Kubernetes API error 404"}
+    ]
+    client.search_workload_owners.assert_called_once_with("svc", "")
+
+    pods = _search_one_cluster_pods("gke-a", {}, "svc", "")
+    assert set(pods["matches"][0]) == _MATCH_KEYS
+    assert pods["matches"][0]["kind"] == "Pod"
+    assert pods["truncated_kinds"] == ["Pod"]
+    client.search_pods.assert_called_once_with("svc", "")
+
+
+def test_a_client_error_reaches_the_caller_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = MagicMock()
+    client.search_workload_owners.return_value = {
+        "success": False,
+        "error": "(401) Reason: Unauthorized",
+    }
+    monkeypatch.setattr(
+        "integrations.kubernetes.tools.fleet_search._resolve_client",
+        lambda _cluster, _configs, conn: (client, conn, None),
+    )
+
+    result = _search_one_cluster_workloads("gke-a", {}, "svc", "")
+
+    assert result["success"] is False
+    assert result["error"] == "(401) Reason: Unauthorized"
+
+
+# ---------------------------------------------------------------------------
+# The client methods
+# ---------------------------------------------------------------------------
+
+
+def _typed_item(name: str, namespace: str, **status: Any) -> Any:
+    item = MagicMock()
+    item.metadata.name = name
+    item.metadata.namespace = namespace
+    item.spec.replicas = status.get("replicas", 1)
+    item.spec.suspend = status.get("suspend", False)
+    item.status.ready_replicas = status.get("ready_replicas", 1)
+    item.status.desired_number_scheduled = status.get("desired_number_scheduled", 1)
+    item.status.number_ready = status.get("number_ready", 1)
+    return item
+
+
+def _typed_list(items: list[Any], *, continue_token: str = "") -> Any:
+    listing = MagicMock()
+    listing.items = items
+    listing.metadata._continue = continue_token
+    return listing
+
+
+def _empty_typed_list() -> Any:
+    return _typed_list([])
+
+
+def test_search_workload_owners_lists_all_namespaces_and_filters_by_substring() -> None:
+    """An empty namespace means every namespace, and matching is case-insensitive."""
+    apps = MagicMock()
+    apps.list_deployment_for_all_namespaces.return_value = _typed_list(
+        [_typed_item("SVC-Api", "payments"), _typed_item("other", "kube-system")]
+    )
+    apps.list_stateful_set_for_all_namespaces.return_value = _empty_typed_list()
+    apps.list_daemon_set_for_all_namespaces.return_value = _empty_typed_list()
+    batch = MagicMock()
+    batch.list_cron_job_for_all_namespaces.return_value = _empty_typed_list()
+    custom = MagicMock()
+    custom.list_cluster_custom_object.return_value = {"items": [], "metadata": {}}
+
+    client = _make_client_with_apis(apps=apps, batch=batch, custom=custom)
+    result = client.search_workload_owners("svc-api")
+
+    assert result["success"] is True
+    assert [row["name"] for row in result["workloads"]] == ["SVC-Api"]
+    assert result["workloads"][0]["namespace"] == "payments"
+    apps.list_deployment_for_all_namespaces.assert_called_once()
+    apps.list_namespaced_deployment.assert_not_called()
+    custom.list_cluster_custom_object.assert_called_once()
+    custom.list_namespaced_custom_object.assert_not_called()
+
+
+def test_search_workload_owners_narrows_when_a_namespace_is_given() -> None:
+    apps = MagicMock()
+    apps.list_namespaced_deployment.return_value = _typed_list([_typed_item("svc-api", "payments")])
+    apps.list_namespaced_stateful_set.return_value = _empty_typed_list()
+    apps.list_namespaced_daemon_set.return_value = _empty_typed_list()
+    batch = MagicMock()
+    batch.list_namespaced_cron_job.return_value = _empty_typed_list()
+    custom = MagicMock()
+    custom.list_namespaced_custom_object.return_value = {"items": [], "metadata": {}}
+
+    client = _make_client_with_apis(apps=apps, batch=batch, custom=custom)
+    result = client.search_workload_owners("svc-api", "payments")
+
+    assert result["success"] is True
+    apps.list_namespaced_deployment.assert_called_once()
+    assert apps.list_namespaced_deployment.call_args.kwargs["namespace"] == "payments"
+    apps.list_deployment_for_all_namespaces.assert_not_called()
+
+
+def test_truncation_comes_from_the_continue_token_not_the_row_count() -> None:
+    """Plan test 13 / D9.
+
+    Fewer rows than the limit, but the server handed back a continue token: the
+    page is partial and "not found" is not yet an answer.
+    """
+    apps = MagicMock()
+    apps.list_deployment_for_all_namespaces.return_value = _typed_list(
+        [_typed_item("other", "kube-system")], continue_token="eyJ2IjoibWV0YS"
+    )
+    apps.list_stateful_set_for_all_namespaces.return_value = _empty_typed_list()
+    apps.list_daemon_set_for_all_namespaces.return_value = _empty_typed_list()
+    batch = MagicMock()
+    batch.list_cron_job_for_all_namespaces.return_value = _empty_typed_list()
+    custom = MagicMock()
+    custom.list_cluster_custom_object.return_value = {"items": [], "metadata": {}}
+
+    client = _make_client_with_apis(apps=apps, batch=batch, custom=custom)
+    result = client.search_workload_owners("svc-api")
+
+    assert result["workloads"] == []
+    assert result["truncated"] is True
+    assert result["truncated_kinds"] == ["Deployment"]
+
+
+def test_an_absent_rollouts_crd_is_unavailable_not_a_cluster_failure() -> None:
+    """Plan test 9. Most clusters do not run Argo Rollouts."""
+    apps = MagicMock()
+    apps.list_deployment_for_all_namespaces.return_value = _typed_list(
+        [_typed_item("svc-api", "payments")]
+    )
+    apps.list_stateful_set_for_all_namespaces.return_value = _empty_typed_list()
+    apps.list_daemon_set_for_all_namespaces.return_value = _empty_typed_list()
+    batch = MagicMock()
+    batch.list_cron_job_for_all_namespaces.return_value = _empty_typed_list()
+    custom = MagicMock()
+    custom.list_cluster_custom_object.side_effect = ApiException(
+        status=HTTPStatus.NOT_FOUND, reason="Not Found"
+    )
+
+    client = _make_client_with_apis(apps=apps, batch=batch, custom=custom)
+    result = client.search_workload_owners("svc-api")
+
+    assert result["success"] is True
+    assert [row["name"] for row in result["workloads"]] == ["svc-api"]
+    assert [entry["kind"] for entry in result["unavailable_kinds"]] == ["Rollout"]
+
+
+@pytest.mark.parametrize(
+    ("status", "expect_capture"),
+    [
+        (HTTPStatus.NOT_FOUND, False),
+        (HTTPStatus.FORBIDDEN, False),
+        (HTTPStatus.UNAUTHORIZED, True),
+        (HTTPStatus.INTERNAL_SERVER_ERROR, True),
+    ],
+)
+def test_no_sentry_error_for_an_absent_crd(status: HTTPStatus, expect_capture: bool) -> None:
+    """Plan test 10 — the Sentry-error-per-turn regression.
+
+    ``capture_service_error`` grades a non-httpx exception ``severity="error"``,
+    so a fleet of mostly non-Argo clusters would file one Sentry error per
+    cluster per turn, forever. A green suite does not catch this: deleting the
+    ``_KIND_UNAVAILABLE_STATUSES`` guard leaves every payload assertion intact.
+    """
+    apps = MagicMock()
+    apps.list_deployment_for_all_namespaces.return_value = _empty_typed_list()
+    apps.list_stateful_set_for_all_namespaces.return_value = _empty_typed_list()
+    apps.list_daemon_set_for_all_namespaces.return_value = _empty_typed_list()
+    batch = MagicMock()
+    batch.list_cron_job_for_all_namespaces.return_value = _empty_typed_list()
+    custom = MagicMock()
+    custom.list_cluster_custom_object.side_effect = ApiException(status=status, reason="nope")
+
+    client = _make_client_with_apis(apps=apps, batch=batch, custom=custom)
+
+    with patch("integrations.kubernetes.client.capture_service_error") as capture:
+        result = client.search_workload_owners("svc-api")
+
+    assert capture.called is expect_capture
+    # A degradable status is still a successful, complete-enough answer;
+    # anything else fails the whole cluster so the caller cannot mistake it
+    # for "nothing here".
+    assert result["success"] is not expect_capture
+
+
+def test_search_pods_lists_all_namespaces_and_reports_its_continue_token() -> None:
+    pod = MagicMock()
+    pod.metadata.name = "svc-api-6c8f9d7b4-2xqlp"
+    pod.metadata.namespace = "payments"
+    pod.status.phase = "Running"
+    ready = MagicMock()
+    ready.name = "app"
+    ready.ready = True
+    ready.restart_count = 4
+    pod.status.container_statuses = [ready]
+
+    other = MagicMock()
+    other.metadata.name = "unrelated"
+    other.metadata.namespace = "kube-system"
+    other.status.phase = "Running"
+    other.status.container_statuses = []
+
+    core = MagicMock()
+    core.list_pod_for_all_namespaces.return_value = _typed_list([pod, other], continue_token="more")
+
+    client = _make_client_with_apis(core=core)
+    result = client.search_pods("SVC-API")
+
+    assert result["success"] is True
+    assert [row["name"] for row in result["pods"]] == ["svc-api-6c8f9d7b4-2xqlp"]
+    assert result["pods"][0]["ready"] == 1
+    assert result["pods"][0]["phase"] == "Running"
+    assert result["truncated"] is True
+    core.list_pod_for_all_namespaces.assert_called_once()
+    core.list_namespaced_pod.assert_not_called()

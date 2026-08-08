@@ -131,33 +131,44 @@ OpenSRE calls `kubernetes_list_clusters` to see `gke-dev` and `gke-prod`, then
 calls the other tools with `cluster="gke-dev"` and `cluster="gke-prod"` to reach
 each one.
 
-## Fleet search
+### Finding a workload when you do not know the cluster
 
-The `kubernetes_search_fleet` tool searches for workloads and pods by name across all your registered clusters at once. It's designed for "where is this service running?" questions when you don't know which cluster or namespace to look in.
+`kubernetes_search_fleet` matches a name substring against every registered
+cluster at once. Ask for it by describing the problem, not the tool:
 
-```bash
-# Search for anything containing "payment" in the name
-kubernetes_search_fleet payment
-
-# Limit to a specific namespace across all clusters  
-kubernetes_search_fleet payment-service --namespace production
-
-# Target a single cluster (useful when you know which environment)
-kubernetes_search_fleet api-gateway --cluster gke-prod
-
-# Include individual pods as well as their owners
-kubernetes_search_fleet worker --include-pods
+```
+> Which cluster is payments-api running in?
 ```
 
-**Two-phase search:** By default, fleet search only looks at workload owners (Deployments, StatefulSets, DaemonSets, Rollouts). If it finds nothing, it automatically searches individual pods as a fallback. Use `--include-pods` to search both phases regardless.
+It looks at workload owners first — Deployments, StatefulSets, DaemonSets,
+CronJobs and Argo Rollouts. Only if nothing matches anywhere does it fall back
+to listing individual pods, which is the expensive path. That fallback is what
+lets you paste a full pod name straight from an alert, replicaset hash and all:
+no owner is named `payments-api-6c8f9d7b4-2xqlp`, but the pod is.
 
-**Performance:** Fleet search runs in parallel across clusters with a 90-second deadline. If a cluster is unreachable or slow, it's marked as failed and doesn't block the other results. The response shows which clusters were searched successfully and which failed.
+Searching every namespace is the point, so leave the namespace out unless the
+request names one. Naming a cluster narrows the search to it.
 
-**Results:** Each match includes the cluster name, namespace, workload kind, name, and creation timestamp. Results are sorted by cluster, then namespace, then kind, then name for consistent ordering.
+**A negative result is only trustworthy when `clusters_failed` is empty and
+`partial` is false.** Clusters are searched in parallel under a 90-second
+budget; any that fail, or that the deadline cuts off, are listed in
+`clusters_failed` with a reason rather than being dropped. `partial` is also set
+when a server truncated a listing, in which case `truncated_kinds` names the
+kinds affected. A cluster that simply does not run Argo Rollouts is *not* a
+failure — it appears in `unavailable_kinds`, and "there are no Rollouts here"
+is a complete answer.
+
+Each match is just `cluster`, `namespace`, `kind`, `name`, `ready`, `desired`
+and `phase` — enough to point the next tool at the right place, and small
+enough that a 17-cluster fleet fits in one answer.
 
 ### Namespace targeting
 
-The effective namespace is the namespace in your request if you name one; otherwise the cluster's configured default namespace; otherwise `default`. Use `kubernetes_list_namespaces` to discover the options when the cluster is unfamiliar.
+For every tool except `kubernetes_search_fleet`, the effective namespace is the
+namespace in your request if you name one; otherwise the cluster's configured
+default namespace; otherwise `default`. Use `kubernetes_list_namespaces` to
+discover the options when the cluster is unfamiliar. Fleet search is the
+exception: omitting the namespace there searches every namespace.
 
 ### Argo Rollouts
 
@@ -275,5 +286,7 @@ rules:
     resources: ["rollouts"]
     verbs: ["get", "list"]
 ```
+
+Fleet search needs these verbs **cluster-scoped** — it lists pods and workload owners across all namespaces at once. A credential bound to a single namespace does not silently return less: the cluster shows up in `clusters_failed` with the API's own reason, so a fleet-wide "not found" stays distinguishable from "not allowed to look".
 
 On GKE, an identity with `roles/viewer` or `roles/container.viewer` can already list namespaces via the IAM authorizer, with no RBAC object needed. If instead the credential authenticates via RBAC only and lacks a cluster-wide binding, `kubernetes_list_namespaces` reports that it cannot enumerate and every other tool still works. A missing `argoproj.io` grant degrades Rollouts only.
