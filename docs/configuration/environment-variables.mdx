@@ -10,7 +10,7 @@ All configuration options for OpenSRE can be set via environment variables. This
 | Variable | Default | Description | Module |
 |----------|---------|-------------|--------|
 | `LLM_PROVIDER` | `anthropic` | Primary LLM provider (`anthropic`, `openai`, `openrouter`, `deepseek`, `gemini`, `nvidia`, `minimax`, `groq`, `azure-openai`, `bedrock`, `ollama`, `codex`, `claude-code`, `cursor`, `gemini-cli`, `antigravity-cli`, `opencode`, `kimi`, `copilot`, `grok-cli`, `pi`) | `config` |
-| `LLM_MAX_TOKENS` | `4096` | Maximum tokens for LLM responses | `config` |
+| `LLM_MAX_TOKENS` | provider default | Overrides the response token budget for every provider and transport. Unset: each provider's own default (4096; 1024 for local Ollama tool calls). Ignored by CLI-backed providers. | `config` |
 | `OPENSRE_LLM_TRANSPORT` | `sdk` | LLM transport for API providers: `sdk` (native SDKs) or `litellm` | `core/llm/transport_mode` |
 
 ### Anthropic
