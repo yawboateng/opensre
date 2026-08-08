@@ -21,6 +21,7 @@ from typing import Any
 
 from config.constants import INVESTIGATION_DISPATCH_TOOL_NAMES
 from core.agent import Agent
+from core.agent.cancel import tool_resources_cancel_requested
 from core.agent.goals import Goal
 from core.agent_harness.agent_builder import AgentConfig, build_agent
 from core.agent_harness.llm_resolution import default_llm_factory
@@ -64,7 +65,7 @@ log = logging.getLogger(__name__)
 # 203): slash_invoke, shell_run, cli_exec. One rule — no per-tool carve-outs.
 _DEDUPE_ACTION_TOOL_NAMES: frozenset[str] = frozenset({"slash_invoke", "shell_run", "cli_exec"})
 
-# Hashable identity for one guarded call (no hot-path json.dumps — AGENTS.md).
+# Hashable identity for one guarded call (no hot-path json.dumps).
 _ActionCallFingerprint = tuple[Any, ...]
 
 
@@ -913,7 +914,7 @@ def _show_response(
         output.print()
         output.render_response_header("assistant")
         # Literal text: the sink decides how to render it safely. The harness
-        # must not reach for terminal-markup helpers (agent_harness/AGENTS.md).
+        # must not reach for terminal-markup helpers.
         output.print("\n".join(display_chunks))
         return
     if handled:
@@ -1050,10 +1051,18 @@ def _run_action_turn(
 
     counts = _count_turn(result, session, history_start)
     response_text, display_chunks, use_final_text = _compose_response(result, session, counts)
+    cancelled = tool_resources_cancel_requested(tool_resources) or bool(
+        getattr(result, "cancelled", False)
+    )
+    # Cancelled turns must not fall through to gather/answer: the host already
+    # owns the terminal UX (timeout message / stop). Drop handoffs; the
+    # orchestrator short-circuits on ``cancelled`` before routing.
+    handoff_contents = () if cancelled else counts.handoff_contents
     # Discovery tools that opt into ``summarize_observation`` (via tool tags)
     # return structured JSON users should not see raw. Stash only those results.
     if (
-        response_text.strip()
+        not cancelled
+        and response_text.strip()
         and counts.generic_success_count > 0
         and not session.last_command_observation
         and _should_stash_observation(
@@ -1062,19 +1071,21 @@ def _run_action_turn(
         )
     ):
         session.last_command_observation = response_text
-    _show_response(
-        args.output,
-        handled=counts.handled,
-        # use_final_text means the composed text *is* the closing message.
-        final_text=response_text if use_final_text else "",
-        display_chunks=display_chunks,
-    )
+    if not cancelled:
+        _show_response(
+            args.output,
+            handled=counts.handled,
+            # use_final_text means the composed text *is* the closing message.
+            final_text=response_text if use_final_text else "",
+            display_chunks=display_chunks,
+        )
 
     log.debug(
-        "action_turn done planned=%s executed=%s handled=%s investigation=%s",
+        "action_turn done planned=%s executed=%s handled=%s cancelled=%s investigation=%s",
         counts.planned_count,
         counts.executed_count,
         counts.handled,
+        cancelled,
         counts.investigation_dispatched,
     )
     return ToolCallingTurnResult(
@@ -1082,11 +1093,12 @@ def _run_action_turn(
         counts.executed_count,
         counts.executed_success_count,
         False,
-        counts.handled,
-        response_text=response_text,
-        handoff_contents=counts.handoff_contents,
-        handoff_requires_gather=counts.handoff_requires_gather,
-        investigation_dispatched=counts.investigation_dispatched,
+        False if cancelled else counts.handled,
+        response_text="" if cancelled else response_text,
+        handoff_contents=handoff_contents,
+        handoff_requires_gather=(False if cancelled else counts.handoff_requires_gather),
+        investigation_dispatched=(False if cancelled else counts.investigation_dispatched),
+        cancelled=cancelled,
     )
 
 

@@ -6,7 +6,7 @@ per-message handler it drives is transport-agnostic and injected by the
 composition root (:mod:`gateway.core.runtime.manager`). Mirrors
 :mod:`gateway.transports.telegram` (poll-based, not a persistent socket).
 
-Transport entry: :mod:`gateway.transports.buzz.wiring` (``start_buzz_worker``).
+Transport entry: :mod:`gateway.transports.buzz.startup` (``start_buzz_worker``).
 """
 
 from __future__ import annotations

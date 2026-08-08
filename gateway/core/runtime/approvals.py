@@ -9,7 +9,8 @@ This module holds the parts that do not depend on a chat transport: the broker
 that connects a click to the waiting tool call, the button identifiers, and the
 harness hooks. Each transport supplies its own :class:`ApprovalPrompter` — Block
 Kit in ``gateway.transports.slack.approvals``, message components in
-``gateway.transports.discord.approvals``, and a text reply in
+``gateway.transports.discord.approvals``, inline keyboard in
+``gateway.transports.telegram.approvals``, and a text reply in
 ``gateway.transports.buzz.approvals``, which has no buttons to offer.
 """
 

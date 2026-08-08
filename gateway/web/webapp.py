@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from config.config import LLMSettings, get_environment
+from config.constants.agent_identity import agent_name
 from config.platform_bootstrap import ensure_project_platform_package
 from config.version import get_opensre_version
 from core.domain.alerts.inbox import (
@@ -236,6 +237,16 @@ def investigate(req: InvestigateRequest, request: Request) -> InvestigateRespons
     if (auth_error := _gateway_auth_error(request)) is not None:
         return auth_error
 
+    from gateway.core.runtime.concurrency import process_turn_gate
+
+    gate = process_turn_gate()
+    # Same process gate as chat / scheduler — busy-drop like GatewayTurnHandler.
+    if not gate.try_acquire():
+        return JSONResponse(
+            {"error": f"{agent_name()} is at capacity. Please try again shortly."},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+
     investigation_metadata = resolve_investigation_context(
         raw_alert=req.raw_alert,
         alert_name=req.alert_name,
@@ -259,3 +270,5 @@ def investigate(req: InvestigateRequest, request: Request) -> InvestigateRespons
             {"error": f"investigation failed: {type(exc).__name__}"},
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
         )
+    finally:
+        gate.release()

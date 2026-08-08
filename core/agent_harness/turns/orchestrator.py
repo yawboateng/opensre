@@ -51,9 +51,14 @@ from core.agent_harness.session.pending_offer import (
 )
 from core.agent_harness.tools.tool_context import capability_not_explicitly_disabled
 from core.agent_harness.turns.conversation_recording import record_conversation_turn
+from core.agent_harness.turns.host_cancel import host_cancel_requested
 from core.agent_harness.turns.transcript_compaction import auto_compact_if_needed
 from core.agent_harness.turns.turn_plan import TurnPlan, build_turn_plan
-from core.agent_harness.turns.turn_results import ToolCallingTurnResult, TurnResult
+from core.agent_harness.turns.turn_results import (
+    FINAL_INTENT_CANCELLED,
+    ToolCallingTurnResult,
+    TurnResult,
+)
 from core.agent_harness.turns.turn_snapshot import TurnSnapshot
 from core.llm_invoke_errors import is_cli_timeout_error
 from platform.observability.trace.spans import component_span, emit_route
@@ -172,8 +177,7 @@ def stream_answer(
     """Stream one grounded conversational answer (guidance only, no tools).
 
     The **direct answer** path (no tools): a single ``invoke_stream`` call with
-    no ReAct loop. The **tool-calling** agent is ``core.agent.Agent`` — see
-    ``core/agent_harness/AGENTS.md``.
+    no ReAct loop. The **tool-calling** agent is ``core.agent.Agent``.
 
     ``request.turn_plan`` is the turn-wide assembly built at turn start. Its
     snapshot (conversation history, integration state, prior investigation,
@@ -319,6 +323,37 @@ class _RouteOutcome:
     evidence_for_offer: str | None = None
 
 
+def _cancelled_turn_result(
+    accounting: TurnAccounting,
+    action_result: ToolCallingTurnResult,
+) -> TurnResult:
+    """Finalize a host-cancelled turn without gather/answer side effects."""
+    cancelled_action = (
+        action_result
+        if action_result.cancelled
+        else replace(action_result, cancelled=True, handoff_contents=())
+    )
+    return accounting.finalize(
+        TurnResult(
+            final_intent=FINAL_INTENT_CANCELLED,
+            action_result=cancelled_action,
+            assistant_response_text="",
+            llm_run=None,
+        )
+    )
+
+
+def _abort_if_cancelled(
+    accounting: TurnAccounting,
+    action_result: ToolCallingTurnResult,
+    output: OutputSink | None,
+) -> TurnResult | None:
+    """Return a cancelled :class:`TurnResult` when the host asked to stop."""
+    if action_result.cancelled or host_cancel_requested(output):
+        return _cancelled_turn_result(accounting, action_result)
+    return None
+
+
 def _gather_and_answer(
     *,
     text: str,
@@ -327,7 +362,9 @@ def _gather_and_answer(
     handoff_contents: tuple[str, ...],
     turn_plan: TurnPlan,
     handoff_requires_gather: bool = True,
-) -> tuple[Any | None, str | None]:
+    output: OutputSink | None = None,
+) -> tuple[Any | None, str | None] | None:
+    """Run gather+answer, or ``None`` when the host cancelled mid-path."""
     # Two cases skip the live gather loop:
     # 1. Answer-only handoffs (``requires_gather=false``): the action turn's
     #    own tool work already produced what the reply needs, and a fresh sweep
@@ -341,11 +378,15 @@ def _gather_and_answer(
     #    emitting the tag *is* the judgement that the user means that incident,
     #    so a clock must not override it and answer with current conditions
     #    instead of what happened.
+    if host_cancel_requested(output):
+        return None
     skip_gather = not handoff_requires_gather or (
         _is_prior_investigation_follow_up_handoff(handoff_contents)
         and turn_plan.snapshot.last_state is not None
     )
     gathered = None if skip_gather else gather(text, turn_plan=turn_plan)
+    if host_cancel_requested(output):
+        return None
     if skip_gather:
         log.debug(
             "gather skipped: %s",
@@ -370,6 +411,8 @@ def _gather_and_answer(
             defer_want_me_to_closer=not skip_gather,
         ),
     )
+    if host_cancel_requested(output):
+        return None
     return run, observation
 
 
@@ -463,6 +506,11 @@ def run_turn(
         consume_confirmed_pending_offer(session, expanded)
     accounting.record_action_result(action_result)
 
+    aborted = _abort_if_cancelled(accounting, action_result, output)
+    if aborted is not None:
+        log.debug("turn cancelled after action; skipping gather/answer")
+        return aborted
+
     handoff_contents = action_result.handoff_contents
     observation = session.last_command_observation
     route = _route_turn(
@@ -494,6 +542,9 @@ def run_turn(
         # if/elif + raise (not match/assert_never): CodeQL does not model
         # ``assert_never`` as noreturn, so locals bound only inside match arms
         # and read after the match trip py/uninitialized-local-variable.
+        aborted = _abort_if_cancelled(accounting, action_result, output)
+        if aborted is not None:
+            return aborted
         if route.intent == "summarize_observation":
             with apply_reasoning_effort(turn_snapshot.reasoning_effort):
                 run = answer(
@@ -504,6 +555,9 @@ def run_turn(
                         turn_plan=turn_plan,
                     ),
                 )
+            aborted = _abort_if_cancelled(accounting, action_result, output)
+            if aborted is not None:
+                return aborted
             outcome = _RouteOutcome(
                 final_intent="cli_agent_summarized",
                 response_text=_response_text(run),
@@ -520,14 +574,18 @@ def run_turn(
             )
         elif route.intent == "gather_and_answer":
             with apply_reasoning_effort(turn_snapshot.reasoning_effort):
-                run, gathered = _gather_and_answer(
+                gathered_outcome = _gather_and_answer(
                     text=text,
                     answer=answer,
                     gather=gather,
                     handoff_contents=handoff_contents,
                     turn_plan=turn_plan,
                     handoff_requires_gather=action_result.handoff_requires_gather,
+                    output=output,
                 )
+            if gathered_outcome is None:
+                return _cancelled_turn_result(accounting, action_result)
+            run, gathered = gathered_outcome
             outcome = _RouteOutcome(
                 final_intent="cli_agent_fallback",
                 response_text=_response_text(run),

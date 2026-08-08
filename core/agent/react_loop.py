@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from core.agent.cancel import tool_resources_cancel_requested
 from core.agent.handle_conclusion import ConclusionHandler
 from core.agent.loop_host import LoopHost
 from core.agent.run_io import AgentRunInput, AgentRunResult
@@ -85,6 +86,7 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
         self._final_system_prompt = self._system
         self._hit_cap = True
         self._terminated_by_tool = False
+        self._cancelled = False
         self._iterations_used = 0
         self._conclusion = ConclusionHandler(host, self._messages, self._runtime_tools)
 
@@ -116,6 +118,10 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
 
     def _run_iteration(self, iteration: int) -> bool:
         """Run one think -> observe step. Return True when the loop should stop."""
+        if tool_resources_cancel_requested(self._tool_resources):
+            self._hit_cap = False
+            self._cancelled = True
+            return True
         self._host._drain_steering_messages(self._messages)
         self._host._emit_runtime(
             TurnStartEvent(
@@ -295,6 +301,7 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
             executed=self._executed,
             tool_results=self._tool_results,
             terminated_by_tool=self._terminated_by_tool,
+            cancelled=self._cancelled,
             hit_iteration_cap=self._hit_cap,
             llm_iterations_used=self._iterations_used,
             final_system_prompt=self._final_system_prompt,
@@ -306,6 +313,7 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
                     "final_text": self._final_text,
                     "hit_iteration_cap": self._hit_cap,
                     "terminated_by_tool": self._terminated_by_tool,
+                    "cancelled": self._cancelled,
                     "message_count": len(self._messages),
                     "executed_count": len(self._executed),
                 },

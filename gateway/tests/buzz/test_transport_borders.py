@@ -57,7 +57,7 @@ def test_buzz_package_never_imports_another_transport() -> None:
 def test_importing_buzz_transport_loads_no_other_transport_sdk() -> None:
     """A Buzz-only deployment must not pay for, or ship, another transport's SDK."""
     probe = (
-        "import sys; import gateway.transports.buzz.wiring; "
+        "import sys; import gateway.transports.buzz.startup; "
         "print(len([m for m in sys.modules if m.startswith('discord')]), "
         "len([m for m in sys.modules if m.startswith('slack_sdk')]), "
         "len([m for m in sys.modules if m.startswith('gateway.transports.telegram')]), "
