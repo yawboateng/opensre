@@ -71,7 +71,7 @@ When set, OpenSRE selects the matching instance. If the hint is absent or unknow
 
 ### By tool argument (Kubernetes)
 
-Every `kubernetes_*` tool takes an optional `cluster` argument naming a registered instance. The agent discovers the names with `kubernetes_list_clusters`, then passes `cluster="gke-prod"` to any tool to target that cluster; omitting it uses the default (first) one. Unlike the Grafana alert-hint path, selection happens per tool call during the investigation or chat turn, so one investigation can span several clusters. See [Kubernetes](kubernetes).
+Every `kubernetes_*` tool takes an optional `cluster` argument naming a registered instance. The agent discovers the names with `kubernetes_list_clusters`, then passes `cluster="gke-prod"` to any tool to target that cluster. Pass this whenever the request names or implies a specific cluster or environment; omitting silently uses the default cluster, which may not be the one asked about. Unlike the Grafana alert-hint path, selection happens per tool call during the investigation or chat turn, so one investigation can span several clusters. See [Kubernetes](kubernetes).
 
 ### Programmatic selectors
 

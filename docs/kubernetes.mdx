@@ -44,7 +44,7 @@ KUBECONFIG_NAMESPACE=production
 opensre integrations verify kubernetes
 ```
 
-A successful verification lists the namespaces visible to the configured credentials.
+A successful verification confirms the configured namespace is readable.
 
 ## Available tools
 
@@ -55,6 +55,7 @@ A successful verification lists the namespaces visible to the configured credent
 | `kubernetes_list_deployments` | List deployments with desired/ready/available replica counts | ✓ |
 | `kubernetes_get_events` | List cluster events — crash loops, OOM kills, scheduling failures | ✓ |
 | `kubernetes_describe_pod` | Fetch full spec, status, and container states for a single pod | ✓ |
+| `kubernetes_list_namespaces` | List namespaces in the cluster | ✓ |
 | `kubernetes_list_nodes` | List cluster nodes with conditions, capacity, and allocatable resources | ✓ |
 | `kubernetes_list_services` | List services with their type, clusterIP, ports, and selector | ✓ |
 | `kubernetes_list_statefulsets` | List StatefulSets with desired/ready/current/updated replica counts |  |
@@ -117,8 +118,7 @@ A single cluster still works with no changes — `opensre integrations setup
 kubernetes` and the environment variables above register the default cluster;
 `add-cluster` (or `KUBERNETES_INSTANCES`) registers additional ones on top of it.
 
-Every `kubernetes_*` tool takes an optional `cluster` argument. Omit it to use
-the default cluster; pass a registered name to target that cluster:
+Every `kubernetes_*` tool takes an optional `cluster` argument. Use `kubernetes_list_clusters` to see valid names. Pass this whenever the request names or implies a specific cluster or environment. Omitting silently uses the default cluster, which may not be the one asked about:
 
 ```
 > Compare pod restart counts between the dev and prod clusters
@@ -127,6 +127,10 @@ the default cluster; pass a registered name to target that cluster:
 OpenSRE calls `kubernetes_list_clusters` to see `gke-dev` and `gke-prod`, then
 calls the other tools with `cluster="gke-dev"` and `cluster="gke-prod"` to reach
 each one.
+
+### Namespace targeting
+
+The effective namespace is the namespace in your request if you name one; otherwise the cluster's configured default namespace; otherwise `default`. Use `kubernetes_list_namespaces` to discover the options when the cluster is unfamiliar.
 
 ### Registering every GKE cluster at once
 
@@ -200,7 +204,7 @@ same context, so clusters it registers are recognized immediately.
 |---|---|---|---|
 | `kubeconfig` | `KUBECONFIG_CONTENT` or read from `KUBECONFIG` | — | Raw kubeconfig YAML (required) |
 | `context` | `KUBECONFIG_CONTEXT` | current context | Kubeconfig context to activate |
-| `namespace` | `KUBECONFIG_NAMESPACE` | `default` | Default namespace for tool queries |
+| `namespace` | `KUBECONFIG_NAMESPACE` | `default` | Fallback namespace when a request does not name one |
 
 ## Example: investigating a crash-looping pod
 
@@ -230,3 +234,5 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list"]
 ```
+
+On GKE, an identity with `roles/viewer` or `roles/container.viewer` can already list namespaces via the IAM authorizer, with no RBAC object needed. If instead the credential authenticates via RBAC only and lacks a cluster-wide binding, `kubernetes_list_namespaces` reports that it cannot enumerate and every other tool still works.
