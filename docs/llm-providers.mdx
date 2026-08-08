@@ -79,7 +79,7 @@ export OPENAI_REASONING_MODEL=gpt-5.4-mini
 export OPENAI_TOOLCALL_MODEL=gpt-5.4-mini
 ```
 
-A shared `LLM_MAX_TOKENS` (default `4096`) controls the response token budget for every provider.
+A shared `LLM_MAX_TOKENS` env var controls the response token budget for every provider and both transports (SDK and LiteLLM). When unset, each provider uses its own default (4096; local Ollama tool calls use 1024). This setting applies to all model tiers, so size it for the smallest model in play. The ceiling is per-model and an over-limit value is rejected by the provider on the first request. CLI-backed providers (codex, claude-code, cursor, …) ignore it — those CLIs expose no scriptable token limit.
 
 ## LiteLLM transport
 
