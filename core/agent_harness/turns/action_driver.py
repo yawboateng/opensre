@@ -16,9 +16,10 @@ import json
 import logging
 import shlex
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from config.constants import INVESTIGATION_DISPATCH_TOOL_NAMES
 from core.agent import Agent
 from core.agent.goals import Goal
 from core.agent_harness.agent_builder import AgentConfig, build_agent
@@ -233,9 +234,6 @@ SELF_RECORDING_ACTION_TOOL_NAMES: frozenset[str] = frozenset(
         "task_cancel",
     }
 )
-INVESTIGATION_DISPATCH_TOOL_NAMES: frozenset[str] = frozenset(
-    {"investigation_start", "alert_sample"}
-)
 # Tools whose user-facing event is rendered live by the surface's tool-event
 # observer (``tool_start``/``tool_end``), so the end-of-turn generic formatter
 # must stay silent for them: repeating their summary would double-print, and
@@ -249,6 +247,7 @@ class ActionTurnPlan:
     user_message: str
     llm: Any
     max_iterations: int
+    system: str
 
 
 @dataclass(frozen=True)
@@ -704,11 +703,12 @@ def _build_action_agent(
     else:
         factory = deps.llm_factory if deps is not None and deps.llm_factory else default_llm_factory
         llm = factory()
-        envelope = build_action_system_prompt_envelope(
-            # No turn plan means no surface is known here; setup facts are
-            # omitted rather than guessed (see _setup_state_for_surface).
-            turn_snapshot or TurnSnapshot.from_session(message, session, surface=None)
-        )
+        snapshot = turn_snapshot or TurnSnapshot.from_session(message, session, surface=None)
+        if not snapshot.active_tools:
+            # The only place both the resolved tool list and the snapshot are in
+            # scope. Prompt text that must not mandate an absent tool reads this.
+            snapshot = replace(snapshot, active_tools=tuple(agent_tools))
+        envelope = build_action_system_prompt_envelope(snapshot)
         # Cached half stays byte-identical across turns; ephemeral (conversation,
         # prior-action-facts) rides with the user message so Anthropic's system
         # cache_control breakpoint is not invalidated every turn.
@@ -749,6 +749,7 @@ def _build_action_agent(
         user_message=user_message,
         llm=llm,
         max_iterations=_MAX_TOOL_CALLING_ITERATIONS,
+        system=system,
     )
 
 

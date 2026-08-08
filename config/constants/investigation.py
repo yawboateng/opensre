@@ -27,9 +27,14 @@ ALERT_TEMPLATE_CHOICES: Final[tuple[str, ...]] = (
     "splunk",
 )
 
+# Tool names that dispatch investigation workflows on action surfaces.
+# Gated together because they share one capability and are filtered together.
+INVESTIGATION_DISPATCH_TOOL_NAMES: Final[tuple[str, ...]] = ("investigation_start", "alert_sample")
+
 __all__ = [
     "ALERT_TEMPLATE_CHOICES",
     "DEFAULT_APPROVAL_EXPIRY_SECONDS",
+    "INVESTIGATION_DISPATCH_TOOL_NAMES",
     "INVESTIGATION_TOOL_CACHE_MAX_CHARS",
     "INVESTIGATION_TOOL_CACHE_MAX_ENTRIES",
     "MAX_INVESTIGATION_LOOPS",
