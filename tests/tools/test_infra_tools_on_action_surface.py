@@ -1,6 +1,6 @@
 """Tests for infrastructure tools on the action surface.
 
-Verifies that exactly the curated set of 14 kubernetes/gcp tools are available
+Verifies that exactly the curated set of 15 kubernetes/gcp tools are available
 on the action surface, with sensitive tools excluded and credentials properly
 protected.
 """
@@ -15,9 +15,9 @@ from core.agent_harness.tools.action_tools import (
 from core.agent_harness.tools.tool_context import ActionToolContext
 from tools.registry import get_registered_tool_map, get_registered_tools
 
-# The exact set of 14 tools that should be on the action surface
+# The exact set of 15 tools that should be on the action surface
 EXPECTED_INFRA_TOOLS_ON_ACTION = {
-    # Kubernetes tools (9)
+    # Kubernetes tools (10)
     "kubernetes_list_pods",
     "kubernetes_get_pod_logs",
     "kubernetes_list_workloads",
@@ -27,6 +27,7 @@ EXPECTED_INFRA_TOOLS_ON_ACTION = {
     "kubernetes_list_nodes",
     "kubernetes_list_services",
     "kubernetes_list_clusters",
+    "kubernetes_search_fleet",
     # GCP tools (5)
     "gcp_list_projects",
     "gcp_list_gke_clusters",
@@ -62,11 +63,12 @@ K8S_TOOLS_WITH_CLUSTER_PARAM = {
     "kubernetes_list_namespaces",
     "kubernetes_list_nodes",
     "kubernetes_list_services",
+    "kubernetes_search_fleet",
 }
 
 
 def test_action_surface_infra_tools_are_exactly_the_curated_set():
-    """Test that action surface has exactly the 14 curated infrastructure tools."""
+    """Test that action surface has exactly the 15 curated infrastructure tools."""
     action_tools = get_registered_tools("action")
     actual_infra_tools = {
         tool.name for tool in action_tools if tool.name.startswith(("kubernetes_", "gcp_"))
@@ -176,7 +178,7 @@ def test_infra_tools_resolve_credentials_through_the_action_context():
         ctx, resolved_integrations=fake_integrations
     )
 
-    # All 14 must resolve, not just the kubernetes half. A gcp availability
+    # All 15 must resolve, not just the kubernetes half. A gcp availability
     # regression on this surface is caught here and nowhere else: registry
     # membership stays green while the model sees no gcp tool at all.
     resolved_infra = {
