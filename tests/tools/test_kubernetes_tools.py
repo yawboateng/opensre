@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from core.agent_harness.tools.registry import RegisteredTool
+from core.execution import execute_tool_calls
+from core.llm.types import ToolCall
+
 from integrations.kubernetes.client import _RESOURCE_DISPATCH
 from integrations.kubernetes.tools import (
     KubernetesDescribePodTool,
@@ -16,6 +22,7 @@ from integrations.kubernetes.tools import (
     KubernetesListDaemonSetsTool,
     KubernetesListDeploymentsTool,
     KubernetesListIngressesTool,
+    KubernetesListNamespacesTool,
     KubernetesListNodesTool,
     KubernetesListPodsTool,
     KubernetesListServicesTool,
@@ -1014,7 +1021,7 @@ def test_run_omitting_cluster_uses_default(monkeypatch) -> None:  # type: ignore
         "integrations.kubernetes.tools._make_client",
         return_value=_make_client_with_core(mock_core),
     ) as mock_make:
-        tool.run(kubeconfig="kc-default", context="ctx-a", namespace="ns-a")
+        tool.run(kubeconfig="kc-default", context="ctx-a", default_namespace="ns-a")
 
     # No cluster named -> the injected default connection fields are used verbatim.
     assert mock_make.call_args.args[0] == {
@@ -1095,3 +1102,140 @@ def test_secrets_are_not_fetchable() -> None:
     would do it by design.
     """
     assert not [key for key in _RESOURCE_DISPATCH if "secret" in key.lower()]
+
+
+# --- Namespace targeting tests -----------------------------------------------
+
+
+def test_model_namespace_argument_survives_the_runtime_merge() -> None:
+    """Namespace passed by model reaches the client, not the stored default.
+
+    This test goes through the real execute_tool_calls path rather than calling
+    run() directly because it reproduces the bug that _base_params starts
+    re-emitting a key named namespace (section 0.4 of the plan). A unit-level
+    run() test would miss this since it bypasses the runtime merge.
+    """
+    # Create a resolved context with a stored namespace different from model's
+    resolved = mock_agent_state()
+    resolved.integrations_context.sources["kubernetes"] = {
+        **_K8S_SOURCE,
+        "namespace": "stored-namespace"  # Different from what model will pass
+    }
+
+    with patch("integrations.kubernetes.client.KubernetesClient.list_pods") as mock_list:
+        mock_list.return_value = {"success": True, "pods": [], "total": 0}
+
+        # Execute with model providing a specific namespace
+        result = execute_tool_calls(
+            [ToolCall(input={"namespace": "model-namespace"})],
+            [RegisteredTool.from_base_tool(KubernetesListPodsTool())],
+            resolved
+        )
+
+        # The namespace that reached the client should be the model's, not stored
+        mock_list.assert_called_once()
+        call_args = mock_list.call_args
+        assert call_args.kwargs["namespace"] == "model-namespace"
+
+
+def test_omitted_namespace_falls_back_to_the_named_clusters_namespace() -> None:
+    """With no model namespace, use the named cluster's stored namespace."""
+    # Two clusters with different stored namespaces
+    multi_cluster_sources = {
+        "kubernetes": [
+            {
+                "name": "cluster-a",
+                "config": {**_K8S_SOURCE, "namespace": "namespace-a"}
+            },
+            {
+                "name": "cluster-b",
+                "config": {**_K8S_SOURCE, "namespace": "namespace-b"}
+            }
+        ]
+    }
+
+    tool = KubernetesListPodsTool()
+    params = tool.extract_params(multi_cluster_sources)
+
+    with patch("integrations.kubernetes.client.KubernetesClient.list_pods") as mock_list:
+        mock_list.return_value = {"success": True, "pods": [], "total": 0}
+
+        # Call with cluster="cluster-b" and no namespace
+        result = tool.run(**params, cluster="cluster-b", namespace="")
+
+        # Should use cluster-b's stored namespace
+        mock_list.assert_called_once()
+        call_args = mock_list.call_args
+        assert call_args.kwargs["namespace"] == "namespace-b"
+
+
+def test_namespace_falls_back_to_default_when_nothing_is_configured() -> None:
+    """With no model namespace and no stored config, fall back to 'default'."""
+    source_no_namespace = {
+        "connection_verified": True,
+        "kubeconfig": _MINIMAL_KUBECONFIG,
+        "context": "",
+        # no 'namespace' key at all
+    }
+
+    tool = KubernetesListPodsTool()
+    params = tool.extract_params({"kubernetes": source_no_namespace})
+
+    with patch("integrations.kubernetes.client.KubernetesClient.list_pods") as mock_list:
+        mock_list.return_value = {"success": True, "pods": [], "total": 0}
+
+        # Call with empty/whitespace namespace
+        result = tool.run(**params, namespace="   ")
+
+        # Should fall back to "default"
+        mock_list.assert_called_once()
+        call_args = mock_list.call_args
+        assert call_args.kwargs["namespace"] == "default"
+
+
+def test_list_namespaces_degrades_when_the_credential_cannot_list_cluster_wide() -> None:
+    """list_namespaces degrades gracefully on 403/401."""
+    tool = KubernetesListNamespacesTool()
+    params = tool.extract_params({"kubernetes": _K8S_SOURCE})
+
+    # Test 403 forbidden case
+    with patch("integrations.kubernetes.client.KubernetesClient.list_namespaces") as mock_list:
+        mock_list.return_value = {
+            "success": False,
+            "forbidden": True,
+            "error": "namespaces is forbidden"
+        }
+
+        result = tool.run(**params)
+
+        assert result["available"] is True
+        assert result["listable"] is False
+        assert result["namespaces"] == []
+        assert result["total"] == 0
+        assert "configured_namespace" in result
+        assert "note" in result
+        assert "cannot enumerate namespaces cluster-wide" in result["note"]
+
+    # Test non-403 error returns tool_unavailable
+    with patch("integrations.kubernetes.client.KubernetesClient.list_namespaces") as mock_list:
+        mock_list.return_value = {
+            "success": False,
+            "error": "connection failed"
+        }
+
+        result = tool.run(**params)
+
+        assert result["available"] is False
+        assert result["listable"] is False
+
+
+@pytest.mark.parametrize("tool_class", [
+    KubernetesListNodesTool,
+    KubernetesListClustersTool,
+    KubernetesListNamespacesTool
+])
+def test_cluster_scoped_tools_expose_no_namespace_parameter(tool_class: type) -> None:
+    """Cluster-scoped tools do not expose namespace parameter."""
+    tool = tool_class()
+    properties = tool.input_schema.get("properties", {})
+    assert "namespace" not in properties
