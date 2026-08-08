@@ -1752,3 +1752,7 @@ class KubernetesListRolloutsTool(BaseTool):
 kubernetes_list_namespaces = KubernetesListNamespacesTool()
 
 kubernetes_list_clusters = KubernetesListClustersTool()
+
+kubernetes_list_workloads = KubernetesListWorkloadsTool()
+
+kubernetes_list_rollouts = KubernetesListRolloutsTool()

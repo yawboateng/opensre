@@ -14,9 +14,10 @@ Supports two auth paths:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 from kubernetes import client as k8s_client
@@ -1000,7 +1001,11 @@ class KubernetesClient:
                     )
                 else:
                     obj = custom_api.get_namespaced_custom_object(
-                        group=entry.group, version=entry.version, namespace=namespace, plural=entry.plural, name=name
+                        group=entry.group,
+                        version=entry.version,
+                        namespace=namespace,
+                        plural=entry.plural,
+                        name=name,
                     )
             else:
                 # Typed resource path: use generated clients
@@ -1094,9 +1099,7 @@ class KubernetesClient:
                 current_revision = status.get("currentPodHash")
                 stable_revision = status.get("stableRS")
                 awaiting_promotion = (
-                    paused
-                    and bool(current_revision)
-                    and current_revision != stable_revision
+                    paused and bool(current_revision) and current_revision != stable_revision
                 )
 
                 rollout = {
@@ -1151,6 +1154,7 @@ class KubernetesClient:
         limit: int = _DEFAULT_LIMIT,
     ) -> dict[str, Any]:
         """List every workload kind in a namespace as one kind-agnostic table."""
+
         @dataclass(frozen=True, slots=True)
         class _KindPage:
             rows: tuple[dict[str, Any], ...]
@@ -1158,7 +1162,6 @@ class KubernetesClient:
             unavailable_reason: str | None
 
         def _collect_kind(
-            kind: str,
             call: Callable[[], Any],
             project: Callable[[Any], dict[str, Any]],
             items_of: Callable[[Any], list[Any]],
@@ -1273,35 +1276,30 @@ class KubernetesClient:
 
             # Collect each kind sequentially
             deployment_page = _collect_kind(
-                "Deployment",
                 lambda: apps_v1.list_namespaced_deployment(namespace=namespace, limit=limit),
                 _deployment_workload_row,
                 lambda result: getattr(result, "items", []),
             )
 
             statefulset_page = _collect_kind(
-                "StatefulSet",
                 lambda: apps_v1.list_namespaced_stateful_set(namespace=namespace, limit=limit),
                 _statefulset_workload_row,
                 lambda result: getattr(result, "items", []),
             )
 
             daemonset_page = _collect_kind(
-                "DaemonSet",
                 lambda: apps_v1.list_namespaced_daemon_set(namespace=namespace, limit=limit),
                 _daemonset_workload_row,
                 lambda result: getattr(result, "items", []),
             )
 
             cronjob_page = _collect_kind(
-                "CronJob",
                 lambda: batch_v1.list_namespaced_cron_job(namespace=namespace, limit=limit),
                 _cronjob_workload_row,
                 lambda result: getattr(result, "items", []),
             )
 
             rollout_page = _collect_kind(
-                "Rollout",
                 lambda: custom_api.list_namespaced_custom_object(
                     group=ARGO_ROLLOUTS_GROUP,
                     version=ARGO_ROLLOUTS_VERSION,
@@ -1314,7 +1312,7 @@ class KubernetesClient:
             )
 
             # Combine all rows and sort by (kind, name)
-            all_rows = []
+            all_rows: list[dict[str, Any]] = []
             all_rows.extend(deployment_page.rows)
             all_rows.extend(statefulset_page.rows)
             all_rows.extend(daemonset_page.rows)
@@ -1334,10 +1332,12 @@ class KubernetesClient:
                 if page.truncated:
                     truncated_kinds.append(kind_name)
                 if page.unavailable_reason:
-                    unavailable_kinds.append({
-                        "kind": kind_name,
-                        "reason": page.unavailable_reason,
-                    })
+                    unavailable_kinds.append(
+                        {
+                            "kind": kind_name,
+                            "reason": page.unavailable_reason,
+                        }
+                    )
 
             return {
                 "success": True,
