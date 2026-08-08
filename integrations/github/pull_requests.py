@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from integrations.github.client import GitHubApiError, GitHubRestClient, resolve_github_token
+from integrations.github.path_safety import repo_path
 from integrations.github.repo_scope import detect_git_remote_repo_scope
 from integrations.github.write_errors import GitHubWriteError
 
@@ -64,7 +65,7 @@ def create_pull_request(
     try:
         payload = client.request(
             "POST",
-            f"repos/{owner}/{repo}/pulls",
+            repo_path(owner, repo, "pulls"),
             body={
                 "title": title,
                 "head": head_branch,

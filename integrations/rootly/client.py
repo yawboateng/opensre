@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from integrations.config_models import RootlyIntegrationConfig
+from integrations.path_safety import safe_path_segment
 from integrations.probes import ProbeResult
 from integrations.rootly.alerts import (
     ALERT_GET_UNENTITLED_STATUSES,
@@ -246,9 +247,12 @@ class RootlyClient:
 
     def get_incident(self, incident_id: str) -> dict[str, Any]:
         """Fetch one incident with its related services and environments."""
+        safe_id = safe_path_segment(incident_id)
+        if safe_id is None:
+            return {"success": False, "error": "incident_id is not a valid Rootly incident id."}
         try:
             payload = self._get(
-                f"/v1/incidents/{incident_id}",
+                f"/v1/incidents/{safe_id}",
                 {"include": "services,environments"},
             )
         except Exception as exc:
@@ -270,10 +274,13 @@ class RootlyClient:
         Causal order is the point of a timeline: reversing it makes the model
         read the resolution before the trigger.
         """
+        safe_id = safe_path_segment(incident_id)
+        if safe_id is None:
+            return {"success": False, "error": "incident_id is not a valid Rootly incident id."}
         size = clamp(page_size, _DEFAULT_EVENT_PAGE_SIZE, _MAX_EVENT_PAGE_SIZE)
         try:
             payload = self._get(
-                f"/v1/incidents/{incident_id}/events",
+                f"/v1/incidents/{safe_id}/events",
                 {"page[size]": size, "sort": "occurred_at"},
             )
         except Exception as exc:
@@ -303,6 +310,9 @@ class RootlyClient:
         creation — a findings note belongs at the moment it was written, not at
         a time the model guessed.
         """
+        safe_id = safe_path_segment(incident_id)
+        if safe_id is None:
+            return {"success": False, "error": "incident_id is not a valid Rootly incident id."}
         text = (event or "").strip()
         if not text:
             return {"success": False, "error": "event text is required."}
@@ -314,7 +324,7 @@ class RootlyClient:
             }
         }
         try:
-            response = self._get_client().post(f"/v1/incidents/{incident_id}/events", json=body)
+            response = self._get_client().post(f"/v1/incidents/{safe_id}/events", json=body)
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
@@ -533,8 +543,11 @@ class RootlyClient:
 
     def get_alert(self, alert_id: str) -> dict[str, Any]:
         """Fetch one alert in full, including its shaped responders."""
+        safe_id = safe_path_segment(alert_id)
+        if safe_id is None:
+            return {"success": False, "error": "alert_id is not a valid Rootly alert id."}
         try:
-            payload = self._get(f"{ALERTS_PATH}/{alert_id}", {})
+            payload = self._get(f"{ALERTS_PATH}/{safe_id}", {})
         except httpx.HTTPStatusError as exc:
             # A 404 here is a wrong id far more often than a missing product,
             # so it neither degrades to an entitlement message (which would

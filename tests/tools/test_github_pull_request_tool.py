@@ -334,7 +334,7 @@ def test_pull_request_failure_reports_the_branch_that_was_created(
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
     fake = _FakeClient(
         fail={
-            f"repos/{OWNER}/{REPO}/pulls": GitHubApiError(
+            f"/repos/{OWNER}/{REPO}/pulls": GitHubApiError(
                 "Validation Failed", status_code=HTTPStatus.UNPROCESSABLE_ENTITY
             )
         }
