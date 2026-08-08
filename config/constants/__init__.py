@@ -162,6 +162,10 @@ from config.constants.llm import (
     LLM_MAX_TOKENS_ENV,
     OPENSRE_LLM_NATIVE_STRUCTURED_OUTPUT_ENV,
 )
+from config.constants.logging import (
+    LOG_LEVEL_ENV,
+    resolve_log_level,
+)
 from config.constants.mariadb import (
     MARIADB_DATABASE_ENV,
     MARIADB_HOST_ENV,
@@ -372,6 +376,8 @@ __all__ = [
     "AZURE_OPENAI_BASE_URL_ENV",
     "LLM_MAX_TOKENS_ENV",
     "OPENSRE_LLM_NATIVE_STRUCTURED_OUTPUT_ENV",
+    "LOG_LEVEL_ENV",
+    "resolve_log_level",
     "AZURE_SQL_DATABASE_ENV",
     "AZURE_SQL_DRIVER_ENV",
     "AZURE_SQL_ENCRYPT_ENV",

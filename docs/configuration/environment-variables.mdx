@@ -136,6 +136,22 @@ All configuration options for OpenSRE can be set via environment variables. This
 | `PI_AGENT_DIR` | | Pi agent config directory override | `integrations/llm_cli` |
 | `PI_CONFIG_DIR` | | Pi config directory override | `integrations/llm_cli` |
 
+## Logging
+
+| Variable | Default | Description | Module |
+|----------|---------|-------------|--------|
+| `OPENSRE_LOG_LEVEL` | `INFO` | How much the process logs (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `config/constants/logging` |
+
+Reach for `DEBUG` when a chat turn answers without using its tools. Before
+replying, the agent runs a short evidence-gathering pass over your connected
+integrations, and that pass can bail out for several reasons — the turn was
+cancelled, no integration is reachable, the model is unavailable, or a tool
+raised. Each reason is logged, so the level is usually the difference between
+"the bot ignored my question" and knowing which step gave up.
+
+An unrecognized value falls back to `INFO` rather than stopping the process, so
+a typo here can never keep a gateway from starting.
+
 ## Agent Identity
 
 | Variable | Default | Description | Module |
