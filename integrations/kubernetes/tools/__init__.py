@@ -143,23 +143,22 @@ def _resolve_client(
     return client, conn, None
 
 
-def _effective_namespace(requested: str, conn: dict[str, Any], cluster_targeted: bool = False) -> str:
+def _effective_namespace(requested: str, conn: dict[str, Any]) -> str:
     """Resolve the effective namespace for a request.
 
-    When targeting the default cluster (cluster_targeted=False):
-    - Use the model's explicit namespace if provided
-    - Otherwise use the default instance's configured namespace
-    - Otherwise use "default"
+    Precedence, highest first:
 
-    When targeting a specific cluster (cluster_targeted=True):
-    - Use the target cluster's configured namespace
-    - Otherwise use "default"
+    1. ``requested`` — the model-supplied ``namespace`` argument.
+    2. ``conn["namespace"]`` — the *resolved* cluster's configured namespace.
+       ``conn`` is whichever instance ``_resolve_client`` selected, so naming a
+       ``cluster`` already switches this to that cluster's own default; the
+       injected default instance's namespace cannot leak across clusters.
+    3. ``DEFAULT_KUBERNETES_NAMESPACE``.
 
-    This ensures that when switching to a different cluster, you get that
-    cluster's configured namespace rather than the default instance's namespace.
+    The model argument must win at step 1 even when a ``cluster`` was named:
+    "pods in payments on the prod cluster" carries both selectors, and the
+    prompt guidance tells the model to send both.
     """
-    if cluster_targeted:
-        return conn.get("namespace") or DEFAULT_KUBERNETES_NAMESPACE
     if requested.strip():
         return requested.strip()
     return conn.get("namespace") or DEFAULT_KUBERNETES_NAMESPACE
@@ -281,7 +280,7 @@ class KubernetesListPodsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, pods=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_pods(
                 namespace=namespace, label_selector=label_selector, limit=limit
@@ -395,7 +394,7 @@ class KubernetesGetPodLogsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, lines=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.get_pod_logs(
                 namespace=namespace, pod_name=pod_name, container=container, tail_lines=tail_lines
@@ -490,7 +489,7 @@ class KubernetesListDeploymentsTool(BaseTool):
             return tool_unavailable(
                 "kubernetes", error or _UNAVAILABLE_MSG, deployments=[], total=0
             )
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_deployments(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -590,7 +589,7 @@ class KubernetesGetEventsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, events=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.get_events(
                 namespace=namespace, field_selector=field_selector, limit=limit
@@ -689,7 +688,7 @@ class KubernetesDescribePodTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, spec={}, status={})
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.describe_pod(namespace=namespace, pod_name=pod_name)
             if not result.get("success"):
@@ -865,7 +864,7 @@ class KubernetesListServicesTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, services=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_services(
                 namespace=namespace, label_selector=label_selector, limit=limit
@@ -958,7 +957,7 @@ class KubernetesListStatefulSetsTool(BaseTool):
             return tool_unavailable(
                 "kubernetes", error or _UNAVAILABLE_MSG, statefulsets=[], total=0
             )
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_statefulsets(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1048,7 +1047,7 @@ class KubernetesListDaemonSetsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, daemonsets=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_daemonsets(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1139,7 +1138,7 @@ class KubernetesListIngressesTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, ingresses=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_ingresses(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1229,7 +1228,7 @@ class KubernetesListConfigMapsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, configmaps=[], total=0)
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.list_configmaps(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1345,7 +1344,7 @@ class KubernetesGetResourceTool(BaseTool):
                 resource_type=resource_type,
                 name=name,
             )
-        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
+        namespace = _effective_namespace(namespace, conn)
         with client:
             result = client.get_resource(
                 resource_type=resource_type, name=name, namespace=namespace

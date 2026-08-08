@@ -14,6 +14,7 @@ Supports two auth paths:
 from __future__ import annotations
 
 import logging
+from http import HTTPStatus
 from typing import Any
 
 import yaml
@@ -33,6 +34,9 @@ _DEFAULT_LIMIT = 50
 # Truncating a namespace list at 50 defeats a discovery tool, and namespace
 # objects are small.
 _NAMESPACE_LIST_LIMIT = 200
+#: Statuses that mean "this credential may not enumerate namespaces cluster-wide"
+#: rather than "the cluster is broken". Both degrade the tool instead of failing it.
+_NAMESPACE_LIST_DENIED_STATUSES = frozenset({HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN})
 
 # Bounds on every request the SDK issues. A control plane that does not
 # authorize this host — GKE master-authorized-networks, a closed security
@@ -612,15 +616,22 @@ class KubernetesClient:
                 )
             return {"success": True, "namespaces": namespaces, "total": len(namespaces)}
         except ApiException as exc:
-            capture_service_error(
-                exc, logger=logger, integration="kubernetes", method="list_namespaces"
-            )
-            # Include forbidden flag for 403/401 to enable graceful degradation
-            extra_data = {"forbidden": True} if exc.status in (401, 403) else {}
+            # A 403 here is the *expected* answer on a namespace-scoped RBAC
+            # binding — cluster-wide list is precisely what probe_access
+            # deliberately does not require. capture_service_error classifies a
+            # non-httpx exception as severity="error", so reporting it would
+            # file one Sentry error per turn, forever, for a case the tool
+            # already degrades on. 401 is a real auth failure and keeps
+            # telemetry, as every other method here does.
+            forbidden = exc.status in _NAMESPACE_LIST_DENIED_STATUSES
+            if exc.status != HTTPStatus.FORBIDDEN:
+                capture_service_error(
+                    exc, logger=logger, integration="kubernetes", method="list_namespaces"
+                )
             return {
                 "success": False,
                 "error": f"Kubernetes API error {exc.status}: {exc.reason}",
-                **extra_data,
+                **({"forbidden": True} if forbidden else {}),
             }
         except Exception as exc:
             capture_service_error(
