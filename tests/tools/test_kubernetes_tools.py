@@ -1757,6 +1757,180 @@ def test_list_rollouts_surfaces_a_degraded_rollout() -> None:
     assert rollout["pause_reasons"] == ["BlueGreenPause"]
 
 
+def test_a_paused_rollout_on_the_stable_revision_is_not_awaiting_promotion() -> None:
+    """``paused`` alone must not read as "a new revision is waiting for you".
+
+    The positive case above sets both ``spec.paused`` and a differing revision
+    pair, so it cannot tell the two clauses apart. A blue-green Rollout that is
+    paused *on the revision already serving traffic* has nothing to promote —
+    reporting otherwise sends an operator to promote a no-op during an incident.
+    Pause here comes only from ``status.pauseConditions`` so that path is
+    exercised too.
+    """
+    mock_custom = MagicMock()
+    mock_custom.list_namespaced_custom_object.return_value = {
+        "items": [
+            {
+                "metadata": {"name": "bg", "namespace": "default"},
+                "spec": {"replicas": 2, "strategy": {"blueGreen": {"activeService": "svc"}}},
+                "status": {
+                    "phase": "Paused",
+                    "currentPodHash": "same-hash",
+                    "stableRS": "same-hash",
+                    "pauseConditions": [{"reason": "BlueGreenPause"}],
+                },
+            }
+        ],
+        "metadata": {},
+    }
+
+    result = _make_client_with_apis(custom=mock_custom).list_rollouts(namespace="default")
+
+    rollout = result["rollouts"][0]
+    assert rollout["paused"] is True, "status.pauseConditions must drive paused"
+    assert rollout["awaiting_promotion"] is False
+    assert rollout["strategy"] == "blueGreen"
+
+
+@pytest.mark.parametrize(
+    ("status", "expect_reported"),
+    [
+        (HTTPStatus.NOT_FOUND, False),
+        (HTTPStatus.FORBIDDEN, False),
+        (HTTPStatus.UNAUTHORIZED, True),
+        (HTTPStatus.INTERNAL_SERVER_ERROR, True),
+    ],
+)
+def test_list_rollouts_flags_an_absent_crd_without_filing_an_error(
+    status: HTTPStatus, expect_reported: bool
+) -> None:
+    """A cluster that does not run Argo is expected, not an incident.
+
+    404/403 must degrade to ``kind_unavailable`` and skip telemetry, or every
+    turn against a non-Argo cluster files one Sentry error forever. 401 is a
+    real credential failure and keeps both the generic error and the report.
+    """
+    mock_custom = MagicMock()
+    mock_custom.list_namespaced_custom_object.side_effect = ApiException(
+        status=int(status), reason="boom"
+    )
+    reported: list[Any] = []
+
+    with patch(
+        "integrations.kubernetes.client.capture_service_error",
+        side_effect=lambda exc, **_kw: reported.append(exc),
+    ):
+        result = _make_client_with_apis(custom=mock_custom).list_rollouts(namespace="default")
+
+    assert result["success"] is False
+    assert result.get("kind_unavailable", False) is not expect_reported
+    assert bool(reported) is expect_reported
+
+
+def test_rollouts_tool_says_the_crd_is_absent_rather_than_failing() -> None:
+    """The absent-CRD answer must reach the model as "not checked", not "error"."""
+    tool = KubernetesListRolloutsTool()
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_rollouts.return_value = {
+        "success": False,
+        "error": "Kubernetes API error 404: Not Found",
+        "kind_unavailable": True,
+    }
+
+    with patch("integrations.kubernetes.tools._make_client", return_value=client):
+        result = tool.run(kubeconfig=_MINIMAL_KUBECONFIG, namespace="default")
+
+    assert result["available"] is True
+    assert result["crd_installed"] is False
+    assert result["rollouts"] == []
+    assert "not evidence the workload is missing" in result["note"]
+
+
+def test_workloads_tool_forwards_unavailable_kinds_to_the_model() -> None:
+    """An unreadable kind must stay visible at the tool boundary.
+
+    The tool description promises "an empty result for a kind means 'none
+    exist', not 'not checked'". Dropping ``unavailable_kinds`` on the way out
+    turns a namespace whose Rollouts are unreadable into a confident "no such
+    workload" — the exact production failure this slice exists to fix.
+    """
+    tool = KubernetesListWorkloadsTool()
+    unavailable = [{"kind": "Rollout", "reason": "Kubernetes API error 403: Forbidden"}]
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_workloads.return_value = {
+        "success": True,
+        "workloads": [],
+        "total": 0,
+        "truncated": False,
+        "truncated_kinds": [],
+        "unavailable_kinds": unavailable,
+    }
+
+    with patch("integrations.kubernetes.tools._make_client", return_value=client):
+        result = tool.run(kubeconfig=_MINIMAL_KUBECONFIG, namespace="default")
+
+    assert result["unavailable_kinds"] == unavailable
+
+
+def test_list_workloads_reports_cronjobs_without_their_env_values() -> None:
+    """CronJobs are one of the five advertised kinds, and carry credentials.
+
+    ``_redact_env_values`` does not walk ``spec.jobTemplate.spec.template``, so
+    the only thing keeping a CronJob's env out of the payload is that the row
+    projection is an allowlist. Real SDK models are used rather than MagicMock
+    because a Mock answers every attribute and would hide both facts.
+    """
+    from kubernetes import client as k8s
+
+    template = k8s.V1PodTemplateSpec(
+        metadata=k8s.V1ObjectMeta(name="t"),
+        spec=k8s.V1PodSpec(
+            containers=[
+                k8s.V1Container(
+                    name="c", env=[k8s.V1EnvVar(name="DB_URL", value="postgres://u:pw@h/db")]
+                )
+            ]
+        ),
+    )
+    cron_jobs = k8s.V1CronJobList(
+        items=[
+            k8s.V1CronJob(
+                metadata=k8s.V1ObjectMeta(name="nightly", namespace="default"),
+                spec=k8s.V1CronJobSpec(
+                    schedule="0 0 * * *",
+                    suspend=False,
+                    job_template=k8s.V1JobTemplateSpec(spec=k8s.V1JobSpec(template=template)),
+                ),
+            )
+        ],
+        metadata=k8s.V1ListMeta(),
+    )
+
+    mock_apps = MagicMock()
+    empty = MagicMock()
+    empty.items = []
+    empty.metadata._continue = ""
+    mock_apps.list_namespaced_deployment.return_value = empty
+    mock_apps.list_namespaced_stateful_set.return_value = empty
+    mock_apps.list_namespaced_daemon_set.return_value = empty
+    mock_batch = MagicMock()
+    mock_batch.list_namespaced_cron_job.return_value = cron_jobs
+    mock_custom = MagicMock()
+    mock_custom.list_namespaced_custom_object.return_value = {"items": [], "metadata": {}}
+
+    result = _make_client_with_apis(
+        apps=mock_apps, batch=mock_batch, custom=mock_custom
+    ).list_workloads(namespace="default")
+
+    rows = result["workloads"]
+    assert [row["kind"] for row in rows] == ["CronJob"]
+    assert rows[0]["name"] == "nightly"
+    assert rows[0]["phase"] == "Active"
+    assert "pw@h" not in repr(result), "CronJob env values must never reach the payload"
+
+
 @pytest.mark.parametrize(
     "tool_class",
     [KubernetesListNodesTool, KubernetesListClustersTool, KubernetesListNamespacesTool],

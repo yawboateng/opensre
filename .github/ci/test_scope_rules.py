@@ -27,8 +27,18 @@ RULES: tuple[PathRule, ...] = (
     # User-facing quickstart surface
     PathRule("docs/quickstart.mdx", ("tests/cli/test_quickstart.py",)),
     # Installer surfaces (curl/bash, PowerShell, docs, Homebrew sync)
-    PathRule("install.sh", ("tests/cli/test_install_matrix.py", "tests/cli/test_install_sh_path.py", "tests/cli/test_install_sh_resolution.py")),
-    PathRule("install.ps1", ("tests/cli/test_install_matrix.py", "tests/cli/test_install_ps1_progress.py")),
+    PathRule(
+        "install.sh",
+        (
+            "tests/cli/test_install_matrix.py",
+            "tests/cli/test_install_sh_path.py",
+            "tests/cli/test_install_sh_resolution.py",
+        ),
+    ),
+    PathRule(
+        "install.ps1",
+        ("tests/cli/test_install_matrix.py", "tests/cli/test_install_ps1_progress.py"),
+    ),
     PathRule("docs/install.mdx", ("tests/cli/test_install_matrix.py",)),
     PathRule("docs/install-local.mdx", ("tests/cli/test_install_matrix.py",)),
     PathRule(
@@ -239,6 +249,10 @@ RULES: tuple[PathRule, ...] = (
             "tests/tools/test_infra_tools_on_action_surface.py",
             "tests/tools/test_telemetry.py",
             "tests/tools/test_registry_index.py",
+            # action_prompt.py / gather_prompt.py feed the committed prompt
+            # snapshot, so editing them here goes red in the full suite unless
+            # the snapshot is regenerated in the same change.
+            "tests/core/agent/prompts/test_prompt_characterization.py",
         ),
     ),
     PathRule(
