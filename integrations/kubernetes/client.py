@@ -22,6 +22,7 @@ from kubernetes import config as k8s_config
 from kubernetes.client.exceptions import ApiException
 from kubernetes.config.config_exception import ConfigException
 
+from config.constants import DEFAULT_KUBERNETES_NAMESPACE
 from integrations.config_models import KubernetesIntegrationConfig
 from integrations.probes import ProbeResult
 from platform.observability.errors.service import capture_service_error
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TAIL_LINES = 100
 _DEFAULT_LIMIT = 50
+# Truncating a namespace list at 50 defeats a discovery tool, and namespace
+# objects are small.
+_NAMESPACE_LIST_LIMIT = 200
 
 # Bounds on every request the SDK issues. A control plane that does not
 # authorize this host — GKE master-authorized-networks, a closed security
@@ -211,8 +215,10 @@ class KubernetesClient:
         (cluster-wide). Cluster-wide calls require a ClusterRole binding which
         is unavailable on GKE Workload Identity, AKS Managed Identity, on-prem
         Role bindings, and k3s restricted configs — all typical targets for this
-        integration. Every investigation tool is namespace-scoped, so a
-        namespace-scoped probe accurately reflects real access.
+        integration. Every namespaced tool is namespace-scoped, so a
+        namespace-scoped probe reflects the access those tools need;
+        kubernetes_list_namespaces needs a cluster-wide read that this probe
+        deliberately does not require, and degrades on its own when it is absent.
         """
         if not self.is_configured:
             return ProbeResult.missing("Missing kubeconfig or kubeconfig_path.")
@@ -584,6 +590,39 @@ class KubernetesClient:
             return {"success": False, "error": f"Kubernetes API error {exc.status}: {exc.reason}"}
         except Exception as exc:
             capture_service_error(exc, logger=logger, integration="kubernetes", method="list_nodes")
+            return {"success": False, "error": str(exc)}
+
+    def list_namespaces(self, limit: int = _NAMESPACE_LIST_LIMIT) -> dict[str, Any]:
+        """List namespaces in the cluster."""
+        try:
+            core_v1, _, _ = self._get_clients()
+            namespace_list = core_v1.list_namespace(limit=limit)
+            namespaces = []
+            for ns in namespace_list.items or []:
+                meta = ns.metadata
+                status = ns.status
+                namespaces.append(
+                    {
+                        "name": meta.name,
+                        "status": status.phase if status else None,
+                        "labels": dict(meta.labels or {}),
+                        "creation_timestamp": (
+                            meta.creation_timestamp.isoformat() if meta.creation_timestamp else None
+                        ),
+                    }
+                )
+            return {"success": True, "namespaces": namespaces, "total": len(namespaces)}
+        except ApiException as exc:
+            capture_service_error(exc, logger=logger, integration="kubernetes", method="list_namespaces")
+            # Include forbidden flag for 403/401 to enable graceful degradation
+            extra_data = {"forbidden": True} if exc.status in (401, 403) else {}
+            return {
+                "success": False,
+                "error": f"Kubernetes API error {exc.status}: {exc.reason}",
+                **extra_data,
+            }
+        except Exception as exc:
+            capture_service_error(exc, logger=logger, integration="kubernetes", method="list_namespaces")
             return {"success": False, "error": str(exc)}
 
     def list_services(
