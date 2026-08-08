@@ -50,6 +50,7 @@ A successful verification confirms the configured namespace is readable.
 
 | Tool | What it does | Chat |
 |---|---|---|
+| `kubernetes_search_fleet` | Search for workloads and pods by name across all clusters in your fleet | ✓ |
 | `kubernetes_list_workloads` | List every workload kind in a namespace: Deployments, StatefulSets, DaemonSets, CronJobs, and Argo Rollouts | ✓ |
 | `kubernetes_list_pods` | List pods in a namespace with phase, readiness, and restart counts | ✓ |
 | `kubernetes_get_pod_logs` | Fetch recent log lines from a pod container | ✓ |
@@ -129,6 +130,30 @@ Every `kubernetes_*` tool takes an optional `cluster` argument. Use `kubernetes_
 OpenSRE calls `kubernetes_list_clusters` to see `gke-dev` and `gke-prod`, then
 calls the other tools with `cluster="gke-dev"` and `cluster="gke-prod"` to reach
 each one.
+
+## Fleet search
+
+The `kubernetes_search_fleet` tool searches for workloads and pods by name across all your registered clusters at once. It's designed for "where is this service running?" questions when you don't know which cluster or namespace to look in.
+
+```bash
+# Search for anything containing "payment" in the name
+kubernetes_search_fleet payment
+
+# Limit to a specific namespace across all clusters  
+kubernetes_search_fleet payment-service --namespace production
+
+# Target a single cluster (useful when you know which environment)
+kubernetes_search_fleet api-gateway --cluster gke-prod
+
+# Include individual pods as well as their owners
+kubernetes_search_fleet worker --include-pods
+```
+
+**Two-phase search:** By default, fleet search only looks at workload owners (Deployments, StatefulSets, DaemonSets, Rollouts). If it finds nothing, it automatically searches individual pods as a fallback. Use `--include-pods` to search both phases regardless.
+
+**Performance:** Fleet search runs in parallel across clusters with a 90-second deadline. If a cluster is unreachable or slow, it's marked as failed and doesn't block the other results. The response shows which clusters were searched successfully and which failed.
+
+**Results:** Each match includes the cluster name, namespace, workload kind, name, and creation timestamp. Results are sorted by cluster, then namespace, then kind, then name for consistent ordering.
 
 ### Namespace targeting
 

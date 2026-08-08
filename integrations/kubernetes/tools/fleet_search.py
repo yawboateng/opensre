@@ -14,6 +14,7 @@ from integrations.kubernetes.tools import (
     _CLUSTER_PROP,
     _UNAVAILABLE_MSG,
     _is_available,
+    _resolve_client,
 )
 
 #: One task per cluster, not per API call: the five kind calls inside a cluster
@@ -30,16 +31,15 @@ _MAX_PARALLEL_CLUSTERS = 8
 _FLEET_SEARCH_DEADLINE_SECONDS = 90.0
 
 
-def _search_one_cluster(
+def _search_one_cluster_workloads(
     cluster_name: str,
     cluster_conn: dict[str, Any],
     name_contains: str,
     namespace: str,
-    include_pods: bool,
 ) -> dict[str, Any]:
-    """Search a single cluster for workloads and optionally pods.
+    """Search workloads in one cluster (phase 1).
 
-    Returns a dict with matches, clusters_searched, clusters_failed, and pods_searched.
+    Returns a dict with matches, success status, truncation, and unavailable kinds.
     """
     try:
         # Build client for this cluster
@@ -49,36 +49,43 @@ def _search_one_cluster(
         client = _make_client(cfg_dict)
         if client is None:
             return {
+                "success": False,
+                "error": "client build failed",
                 "matches": [],
-                "clusters_searched": [],
-                "clusters_failed": [{"cluster": cluster_name, "reason": "client build failed"}],
-                "pods_searched": False,
+                "truncated": False,
                 "unavailable_kinds": [],
             }
 
-        # Search workload owners first (phase 1)
+        # Search workload owners
         workload_result = client.search_workload_owners(name_contains, namespace)
         if not workload_result.get("success"):
             return {
+                "success": False,
+                "error": workload_result.get("error", "unknown error"),
                 "matches": [],
-                "clusters_searched": [],
-                "clusters_failed": [
-                    {
-                        "cluster": cluster_name,
-                        "reason": workload_result.get("error", "unknown error"),
-                    }
-                ],
-                "pods_searched": False,
+                "truncated": False,
                 "unavailable_kinds": [],
             }
 
         workload_matches = workload_result.get("workloads", [])
-        unavailable_kinds = []
 
-        # Add cluster name to matches and unavailable_kinds
+        # Project matches to final shape and add cluster name
+        projected_matches = []
         for match in workload_matches:
-            match["cluster"] = cluster_name
+            projected_matches.append(
+                {
+                    "cluster": cluster_name,
+                    "namespace": match.get("namespace"),
+                    "kind": match.get("kind"),
+                    "name": match.get("name"),
+                    "ready": match.get("ready"),
+                    "desired": match.get("desired"),
+                    "phase": match.get("phase"),
+                }
+            )
 
+        # Collect unavailable kinds with cluster name
+        unavailable_kinds = []
         for kind_info in workload_result.get("unavailable_kinds", []):
             unavailable_kinds.append(
                 {
@@ -88,37 +95,86 @@ def _search_one_cluster(
                 }
             )
 
-        # Phase 2: Search pods if no workload matches and include_pods is True OR explicit
-        pods_searched = False
-        pod_matches = []
-
-        if include_pods or len(workload_matches) == 0:
-            pods_searched = True
-            pod_result = client.search_pods(name_contains, namespace)
-            if pod_result.get("success"):
-                pod_matches = pod_result.get("pods", [])
-                # Add cluster name to pod matches
-                for match in pod_matches:
-                    match["cluster"] = cluster_name
-
-        # Combine matches
-        all_matches = workload_matches + pod_matches
-
         return {
-            "matches": all_matches,
-            "clusters_searched": [cluster_name],
-            "clusters_failed": [],
-            "pods_searched": pods_searched,
+            "success": True,
+            "matches": projected_matches,
+            "truncated": workload_result.get("truncated", False),
             "unavailable_kinds": unavailable_kinds,
         }
 
     except Exception as exc:
         return {
+            "success": False,
+            "error": str(exc),
             "matches": [],
-            "clusters_searched": [],
-            "clusters_failed": [{"cluster": cluster_name, "reason": str(exc)}],
-            "pods_searched": False,
+            "truncated": False,
             "unavailable_kinds": [],
+        }
+
+
+def _search_one_cluster_pods(
+    cluster_name: str,
+    cluster_conn: dict[str, Any],
+    name_contains: str,
+    namespace: str,
+) -> dict[str, Any]:
+    """Search pods in one cluster (phase 2).
+
+    Returns a dict with matches, success status, and truncation.
+    """
+    try:
+        # Build client for this cluster
+        cfg_dict = {"kubernetes": cluster_conn}
+        from integrations.kubernetes.tools import _make_client
+
+        client = _make_client(cfg_dict)
+        if client is None:
+            return {
+                "success": False,
+                "error": "client build failed",
+                "matches": [],
+                "truncated": False,
+            }
+
+        # Search pods
+        pod_result = client.search_pods(name_contains, namespace)
+        if not pod_result.get("success"):
+            return {
+                "success": False,
+                "error": pod_result.get("error", "unknown error"),
+                "matches": [],
+                "truncated": False,
+            }
+
+        pod_matches = pod_result.get("pods", [])
+
+        # Project matches to final shape and add cluster name
+        projected_matches = []
+        for match in pod_matches:
+            projected_matches.append(
+                {
+                    "cluster": cluster_name,
+                    "namespace": match.get("namespace"),
+                    "kind": match.get("kind"),
+                    "name": match.get("name"),
+                    "ready": match.get("ready"),
+                    "desired": match.get("desired"),
+                    "phase": match.get("phase"),
+                }
+            )
+
+        return {
+            "success": True,
+            "matches": projected_matches,
+            "truncated": pod_result.get("truncated", False),
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "matches": [],
+            "truncated": False,
         }
 
 
@@ -223,7 +279,7 @@ class KubernetesSearchFleetTool(BaseTool):
         kubeconfig: str = "",
         kubeconfig_path: str = "",
         context: str = "",
-        default_namespace: str = "",  # noqa: ARG002 — see below
+        default_namespace: str = "",
         cluster_configs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Search for workloads across the fleet."""
@@ -240,7 +296,7 @@ class KubernetesSearchFleetTool(BaseTool):
         # empty namespace argument means every namespace, full stop.
         search_namespace = namespace.strip()
 
-        # Resolve cluster selection
+        # Use _resolve_client to handle cluster selection properly
         configs = cluster_configs or {}
         default_conn = {
             "kubeconfig": kubeconfig,
@@ -249,14 +305,13 @@ class KubernetesSearchFleetTool(BaseTool):
             "namespace": default_namespace,
         }
 
+        # Determine selected clusters
         if cluster:
-            # Single cluster specified
-            selected_clusters = {cluster: configs.get(cluster)}
-            if selected_clusters[cluster] is None:
-                available = sorted(configs)
-                return tool_unavailable(
-                    "kubernetes", f"unknown cluster '{cluster}'; available clusters: {available}"
-                )
+            # Single cluster - use _resolve_client to validate
+            client, conn, error = _resolve_client(cluster, configs, default_conn)
+            if error:
+                return tool_unavailable("kubernetes", error)
+            selected_clusters = {cluster: conn}
         else:
             # All clusters
             if configs:
@@ -265,74 +320,110 @@ class KubernetesSearchFleetTool(BaseTool):
                 # Fallback to default
                 selected_clusters = {"default": default_conn}
 
-        # Validate all selected clusters exist
-        for cluster_name, cluster_conn in selected_clusters.items():
-            if cluster_conn is None:
-                available = sorted(configs)
-                return tool_unavailable(
-                    "kubernetes",
-                    f"unknown cluster '{cluster_name}'; available clusters: {available}",
-                )
-
-        # Fan out across selected clusters with deadline
+        # Phase 1: Search workload owners across fleet
         deadline = time.monotonic() + _FLEET_SEARCH_DEADLINE_SECONDS
         ctx = contextvars.copy_context()
 
-        all_matches: list[dict[str, Any]] = []
-        clusters_searched: list[str] = []
-        clusters_failed: list[dict[str, str]] = []
-        all_unavailable_kinds: list[dict[str, str]] = []
-        pods_searched = False
+        # Use ThreadPoolExecutor without context manager to control shutdown properly
+        executor = ThreadPoolExecutor(max_workers=_MAX_PARALLEL_CLUSTERS)
 
-        with ThreadPoolExecutor(max_workers=_MAX_PARALLEL_CLUSTERS) as pool:
-            def _submit_cluster_search(
-                cname: str, cconn: dict[str, Any]
-            ) -> dict[str, Any]:
-                return ctx.run(
-                    _search_one_cluster,
-                    cname,
-                    cconn,
-                    name_contains,
-                    search_namespace,
-                    include_pods,
-                )
+        try:
+            # Submit phase 1 jobs
+            def _submit_workload_search(cname: str, cconn: dict[str, Any]) -> dict[str, Any]:
+                return ctx.run(_search_one_cluster_workloads, cname, cconn, name_contains, search_namespace)
 
-            futures = {
-                pool.submit(_submit_cluster_search, cluster_name, cluster_conn): cluster_name
-                for cluster_name, cluster_conn in selected_clusters.items()
-                if cluster_conn is not None  # Should never be None after validation above
+            phase1_futures = {
+                executor.submit(_submit_workload_search, cname, cconn): cname
+                for cname, cconn in selected_clusters.items()
             }
 
-            done, pending = concurrent.futures.wait(
-                futures, timeout=max(0.0, deadline - time.monotonic())
+            # Wait for phase 1 with deadline
+            phase1_done, phase1_pending = concurrent.futures.wait(
+                phase1_futures, timeout=max(0.0, deadline - time.monotonic())
             )
 
-            # Process completed futures
-            for future in done:
+            # Collect phase 1 results
+            phase1_matches = []
+            clusters_searched = []
+            clusters_failed = []
+            all_unavailable_kinds = []
+            truncated_clusters = set()
+
+            for future in phase1_done:
+                cluster_name = phase1_futures[future]
                 try:
                     result = future.result()
-                    all_matches.extend(result["matches"])
-                    clusters_searched.extend(result["clusters_searched"])
-                    clusters_failed.extend(result["clusters_failed"])
-                    all_unavailable_kinds.extend(result["unavailable_kinds"])
-                    if result["pods_searched"]:
-                        pods_searched = True
+                    if result["success"]:
+                        clusters_searched.append(cluster_name)
+                        phase1_matches.extend(result["matches"])
+                        all_unavailable_kinds.extend(result["unavailable_kinds"])
+                        if result["truncated"]:
+                            truncated_clusters.add(cluster_name)
+                    else:
+                        clusters_failed.append({"cluster": cluster_name, "reason": result["error"]})
                 except Exception as exc:
-                    cluster_name = futures[future]
                     clusters_failed.append({"cluster": cluster_name, "reason": str(exc)})
 
-            # Handle timed-out futures
-            for future in pending:
-                cluster_name = futures[future]
+            # Handle phase 1 timeouts
+            for future in phase1_pending:
+                cluster_name = phase1_futures[future]
                 clusters_failed.append(
                     {"cluster": cluster_name, "reason": "search deadline exceeded"}
                 )
 
-            # Deliberately leak threads: shutdown(wait=False, cancel_futures=True)
-            # cannot interrupt a thread already inside a socket read; those threads
-            # finish when their 60s read timeout fires. They touch nothing shared
-            # and write to no collected structure after the deadline.
-            pool.shutdown(wait=False, cancel_futures=True)
+            # Phase 2: Search pods only if fleet-wide phase 1 found nothing OR include_pods is True
+            phase2_matches = []
+            pods_searched = False
+
+            if include_pods or len(phase1_matches) == 0:
+                pods_searched = True
+
+                # Only search clusters that succeeded in phase 1
+                def _submit_pod_search(cname: str, cconn: dict[str, Any]) -> dict[str, Any]:
+                    return ctx.run(_search_one_cluster_pods, cname, cconn, name_contains, search_namespace)
+
+                phase2_futures = {
+                    executor.submit(_submit_pod_search, cname, selected_clusters[cname]): cname
+                    for cname in clusters_searched
+                }
+
+                # Wait for phase 2 with remaining deadline
+                phase2_done, phase2_pending = concurrent.futures.wait(
+                    phase2_futures, timeout=max(0.0, deadline - time.monotonic())
+                )
+
+                for future in phase2_done:
+                    cluster_name = phase2_futures[future]
+                    try:
+                        result = future.result()
+                        if result["success"]:
+                            phase2_matches.extend(result["matches"])
+                            if result["truncated"]:
+                                truncated_clusters.add(cluster_name)
+                        else:
+                            # Phase 2 failure: move cluster from searched to failed
+                            clusters_searched.remove(cluster_name)
+                            clusters_failed.append(
+                                {"cluster": cluster_name, "reason": result["error"]}
+                            )
+                    except Exception as exc:
+                        clusters_searched.remove(cluster_name)
+                        clusters_failed.append({"cluster": cluster_name, "reason": str(exc)})
+
+                # Handle phase 2 timeouts
+                for future in phase2_pending:
+                    cluster_name = phase2_futures[future]
+                    clusters_searched.remove(cluster_name)
+                    clusters_failed.append(
+                        {"cluster": cluster_name, "reason": "search deadline exceeded"}
+                    )
+
+        finally:
+            # Properly shutdown executor without context manager re-joining
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        # Combine all matches
+        all_matches = phase1_matches + phase2_matches
 
         # Sort matches by (cluster, namespace, kind, name)
         all_matches.sort(
@@ -344,20 +435,11 @@ class KubernetesSearchFleetTool(BaseTool):
             )
         )
 
-        # Deduplicate truncated kinds across clusters
-        truncated_kinds = sorted(
-            {
-                kind
-                for match in all_matches
-                if match.get("truncated_kinds")
-                for kind in match.get("truncated_kinds", [])
-            }
-        )
+        # Determine truncation status (per cluster, not per match)
+        truncated = len(truncated_clusters) > 0
+        truncated_kinds = sorted(truncated_clusters) if truncated else []
 
-        # Determine if any results were truncated
-        truncated = len(truncated_kinds) > 0
-
-        # Partial if any clusters failed or truncated
+        # Partial if any clusters failed or results were truncated
         partial = len(clusters_failed) > 0 or truncated
 
         return {
