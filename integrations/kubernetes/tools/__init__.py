@@ -431,7 +431,7 @@ class KubernetesListDeploymentsTool(BaseTool):
         "Verifying deployment replica health across a namespace",
         "Identifying deployments stuck in a partial-rollout state",
     ]
-    surfaces = ("investigation", "chat", "action")
+    surfaces = ("investigation", "chat")
     requires = []
     injected_params = [
         "kubeconfig",
@@ -1532,6 +1532,220 @@ class KubernetesListNamespacesTool(BaseTool):
                 "namespaces": result["namespaces"],
                 "total": result["total"],
                 "configured_namespace": configured_namespace,
+            }
+
+
+class KubernetesListWorkloadsTool(BaseTool):
+    """List every workload in a Kubernetes namespace regardless of kind."""
+
+    name = "kubernetes_list_workloads"
+    source = "kubernetes"
+    description = (
+        "List every workload in a Kubernetes namespace regardless of kind: Deployments, "
+        "StatefulSets, DaemonSets, CronJobs, and Argo Rollouts, in one table. Prefer this "
+        "over the kind-specific listers when asked whether a workload exists or is healthy — "
+        "a service may be an Argo Rollout rather than a Deployment, and kubernetes_list_deployments "
+        "returns nothing for it. ReplicaSets are omitted: they are intermediate objects owned by "
+        "a Deployment or Rollout. Kinds the cluster does not run or the credential cannot read "
+        "are reported in unavailable_kinds rather than silently dropped, so an empty result for "
+        "a kind means 'none exist', not 'not checked'."
+    )
+    use_cases = [
+        "Checking whether a named service exists in a namespace, whatever kind it is",
+        "Triaging a namespace where workloads are Argo Rollouts rather than Deployments",
+        "Finding degraded workloads across every kind in one call",
+        "Confirming a workload is absent before reporting that nothing was found",
+    ]
+    anti_examples = [
+        "Listing pods or checking restart counts (use kubernetes_list_pods)",
+        "Reading Rollout strategy, step, or revision detail (use kubernetes_list_rollouts)",
+    ]
+    surfaces = ("investigation", "chat", "action")
+    requires = []
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
+    input_schema = {
+        "type": "object",
+        "properties": {
+            **_SHARED_KUBECONFIG_PROPS,
+            "limit": {
+                "type": "integer",
+                "default": 50,
+                "description": "Maximum number of workloads to return per kind",
+            },
+        },
+        "required": [],
+    }
+    outputs = {
+        "workloads": "One row per workload with kind, name, ready/desired counts, and phase",
+        "total": "Number of workload rows returned",
+        "truncated": "True when at least one kind had more workloads than the limit returned",
+        "truncated_kinds": "Kinds whose list was cut short by the limit",
+        "unavailable_kinds": "Kinds that could not be listed, with the reason (e.g. CRD absent)",
+    }
+
+    def is_available(self, sources: dict[str, Any]) -> bool:
+        return _is_available(sources)
+
+    def extract_params(self, sources: dict[str, Any]) -> dict[str, Any]:
+        return _base_params(sources)
+
+    def run(
+        self,
+        kubeconfig: str = "",
+        kubeconfig_path: str = "",
+        context: str = "",
+        namespace: str = "",
+        cluster: str = "",
+        default_namespace: str = "",
+        cluster_configs: dict[str, Any] | None = None,
+        limit: int = 50,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        client, conn, error = _resolve_client(
+            cluster,
+            cluster_configs,
+            {
+                "kubeconfig": kubeconfig,
+                "kubeconfig_path": kubeconfig_path,
+                "context": context,
+                "namespace": default_namespace,
+            },
+        )
+        if client is None:
+            return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, workloads=[], total=0)
+        namespace = _effective_namespace(namespace, conn)
+        with client:
+            result = client.list_workloads(namespace=namespace, limit=limit)
+            if not result.get("success"):
+                return tool_unavailable(
+                    "kubernetes", result.get("error", "unknown error"), workloads=[], total=0
+                )
+            return {
+                "source": "kubernetes",
+                "available": True,
+                "namespace": namespace,
+                "workloads": result["workloads"],
+                "total": result["total"],
+                "truncated": result["truncated"],
+                "truncated_kinds": result["truncated_kinds"],
+                "unavailable_kinds": result["unavailable_kinds"],
+            }
+
+
+class KubernetesListRolloutsTool(BaseTool):
+    """List Argo Rollouts with strategy, phase, step, and revision state."""
+
+    name = "kubernetes_list_rollouts"
+    source = "kubernetes"
+    description = (
+        "List Argo Rollouts in a Kubernetes namespace with their strategy, phase, step, "
+        "pause state, and revision information. Use to diagnose Argo Rollout deployments, "
+        "check promotion status, and understand canary/blue-green strategy state."
+    )
+    use_cases = [
+        "Checking if a Rollout is paused and awaiting promotion",
+        "Diagnosing stuck or failed Argo Rollout deployments",
+        "Understanding canary step progression and timing",
+        "Verifying blue-green strategy switching state",
+    ]
+    anti_examples = [
+        "Listing regular Deployments (use kubernetes_list_deployments)",
+        "Checking pod status (use kubernetes_list_pods)",
+        "Finding workloads of unknown type (use kubernetes_list_workloads)",
+    ]
+    surfaces = ("investigation", "chat")
+    requires = []
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
+    input_schema = {
+        "type": "object",
+        "properties": {
+            **_SHARED_KUBECONFIG_PROPS,
+            "limit": {
+                "type": "integer",
+                "default": 50,
+                "description": "Maximum number of Rollouts to return",
+            },
+        },
+        "required": [],
+    }
+    outputs = {
+        "rollouts": "Rollouts with strategy, phase, step, pause state, and revisions",
+        "total": "Number of Rollouts returned",
+        "truncated": "True when more Rollouts exist than the limit returned",
+        "crd_installed": "False when the cluster does not run Argo Rollouts",
+    }
+
+    def is_available(self, sources: dict[str, Any]) -> bool:
+        return _is_available(sources)
+
+    def extract_params(self, sources: dict[str, Any]) -> dict[str, Any]:
+        return _base_params(sources)
+
+    def run(
+        self,
+        kubeconfig: str = "",
+        kubeconfig_path: str = "",
+        context: str = "",
+        namespace: str = "",
+        cluster: str = "",
+        default_namespace: str = "",
+        cluster_configs: dict[str, Any] | None = None,
+        limit: int = 50,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        client, conn, error = _resolve_client(
+            cluster,
+            cluster_configs,
+            {
+                "kubeconfig": kubeconfig,
+                "kubeconfig_path": kubeconfig_path,
+                "context": context,
+                "namespace": default_namespace,
+            },
+        )
+        if client is None:
+            return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, rollouts=[], total=0)
+        namespace = _effective_namespace(namespace, conn)
+        with client:
+            result = client.list_rollouts(namespace=namespace, limit=limit)
+            if result.get("kind_unavailable"):
+                return {
+                    "source": "kubernetes",
+                    "available": True,
+                    "crd_installed": False,
+                    "rollouts": [],
+                    "total": 0,
+                    "namespace": namespace,
+                    "note": (
+                        "This cluster does not expose Argo Rollouts, or the credential "
+                        "cannot read them. That is not evidence the workload is missing — "
+                        "use kubernetes_list_workloads to see the kinds that are readable."
+                    ),
+                }
+            if not result.get("success"):
+                return tool_unavailable(
+                    "kubernetes", result.get("error", "unknown error"), rollouts=[], total=0
+                )
+            return {
+                "source": "kubernetes",
+                "available": True,
+                "crd_installed": True,
+                "namespace": namespace,
+                "rollouts": result["rollouts"],
+                "total": result["total"],
+                "truncated": result["truncated"],
             }
 
 
