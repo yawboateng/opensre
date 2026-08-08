@@ -1268,8 +1268,24 @@ _NAMESPACED_TOOL_CASES: list[tuple[Any, str, dict[str, Any], dict[str, Any]]] = 
         {"resource_type": "pod", "name": "p"},
         {"resource": {}, "resource_type": "pod", "name": "p"},
     ),
-    (KubernetesListWorkloadsTool, "list_workloads", {}, {"workloads": [], "total": 0}),
-    (KubernetesListRolloutsTool, "list_rollouts", {}, {"rollouts": [], "total": 0}),
+    (
+        KubernetesListWorkloadsTool,
+        "list_workloads",
+        {},
+        {
+            "workloads": [],
+            "total": 0,
+            "truncated": False,
+            "truncated_kinds": [],
+            "unavailable_kinds": [],
+        },
+    ),
+    (
+        KubernetesListRolloutsTool,
+        "list_rollouts",
+        {},
+        {"rollouts": [], "total": 0, "truncated": False},
+    ),
 ]
 
 

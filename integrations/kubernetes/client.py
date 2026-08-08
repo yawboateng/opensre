@@ -991,16 +991,21 @@ class KubernetesClient:
                     f"Unsupported resource_type '{resource_type}'. Supported types: {supported}"
                 ),
             }
+        resource_dict: dict[str, Any]
         try:
             if isinstance(entry, _CustomResource):
-                # CRD path: use CustomObjectsApi
+                # CRD path: CustomObjectsApi returns decoded JSON (plain dicts,
+                # lists and scalars), not a generated model, so it needs neither
+                # sanitize_for_serialization nor the ApiClient that method hangs
+                # off — asking for one here would couple this branch to a client
+                # it never calls.
                 custom_api = self._get_custom_objects()
                 if entry.cluster_scoped:
-                    obj = custom_api.get_cluster_custom_object(
+                    resource_dict = custom_api.get_cluster_custom_object(
                         group=entry.group, version=entry.version, plural=entry.plural, name=name
                     )
                 else:
-                    obj = custom_api.get_namespaced_custom_object(
+                    resource_dict = custom_api.get_namespaced_custom_object(
                         group=entry.group,
                         version=entry.version,
                         namespace=namespace,
@@ -1021,8 +1026,11 @@ class KubernetesClient:
                     obj = method(name=name)
                 else:
                     obj = method(name=name, namespace=namespace)
-            assert self._api_client is not None  # always set by _build_clients()
-            resource_dict: dict[str, Any] = self._api_client.sanitize_for_serialization(obj)
+                # _get_clients() above builds _api_client, so it is set here.
+                api_client = self._api_client
+                if api_client is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Kubernetes ApiClient was not initialised")
+                resource_dict = api_client.sanitize_for_serialization(obj)
             # Redact env var values from pod and workload resources to prevent
             # credential leakage to the LLM. Workload controllers (Deployment,
             # StatefulSet, DaemonSet, ReplicaSet) embed a pod template that also
