@@ -71,7 +71,7 @@ class DiscordOutputSink:
         suppress_if_starts_with: str | None = None,
         defer_want_me_to_closer: bool = False,
     ) -> str:
-        _ = (label, suppress_if_starts_with, defer_want_me_to_closer)
+        _ = (label, suppress_if_starts_with)
         parts: list[str] = []
         for chunk in chunks:
             parts.append(str(chunk))
@@ -79,7 +79,11 @@ class DiscordOutputSink:
             now = time.monotonic()
             if now - self._last_edit >= self._edit_interval:
                 self._edit_preview(combined)
-        return "".join(parts)
+        text = "".join(parts)
+        if defer_want_me_to_closer:
+            return text
+        self.finalize(text or EMPTY_RESPONSE_MESSAGE)
+        return text
 
     def set_tool_status(self, text: str) -> None:
         self._set_status(text)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -182,6 +182,7 @@ class RecordingGatewaySink:
     def __init__(self) -> None:
         self.lines: list[str] = []
         self.streamed: list[str] = []
+        self.finished: list[str] = []
         self.finalized: str | None = None
 
     def print(self, message: str = "") -> None:
@@ -198,7 +199,7 @@ class RecordingGatewaySink:
         self,
         *,
         label: str,
-        chunks: Iterator[str],
+        chunks: Iterable[str],
         suppress_if_starts_with: str | None = None,
         defer_want_me_to_closer: bool = False,
     ) -> str:
@@ -207,14 +208,19 @@ class RecordingGatewaySink:
         self.streamed.append(text)
         return text
 
+    def set_tool_status(self, text: str) -> None:
+        self.lines.append(f"[tool] {text}")
+
     def finish_streamed_response(self, text: str) -> None:
-        self.finalize(text)
+        self.finished.append(text)
 
     def finalize(self, text: str) -> None:
         self.finalized = text
 
     @property
     def outbound_text(self) -> str:
+        if self.finished:
+            return self.finished[-1].strip()
         if self.finalized:
             return self.finalized.strip()
         if self.streamed:

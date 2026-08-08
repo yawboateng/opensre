@@ -136,7 +136,7 @@ class GatewayTurnHandler:
                 )
                 turn_result = self._session_api.chat(text, agent=agent)
                 outbound_text = turn_result.primary_response_text
-                logger.debug(
+                logger.info(
                     "gateway_turn done intent=%s answered=%s outbound_chars=%s",
                     turn_result.final_intent,
                     turn_result.answered,
