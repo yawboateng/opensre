@@ -62,6 +62,11 @@ from config.constants.datadog import (
     DATADOG_APP_KEY_ENV,
     DATADOG_SITE_ENV,
 )
+from config.constants.datastore import (
+    DATABASE_URI_ENV,
+    DATABASE_URL_ENV,
+    database_dsn,
+)
 from config.constants.filestorage import (
     BLOB_READ_WRITE_TOKEN_ENV,
     DEFAULT_REMOTE_SYNC_PREFIX,
@@ -393,6 +398,9 @@ __all__ = [
     "CREDITS_HTTP_TIMEOUT_SECONDS",
     "DAGSTER_API_TOKEN_ENV",
     "DAGSTER_ENDPOINT_ENV",
+    "DATABASE_URI_ENV",
+    "DATABASE_URL_ENV",
+    "database_dsn",
     "DATADOG_API_KEY_ENV",
     "DATADOG_APP_KEY_ENV",
     "DATADOG_SITE_ENV",

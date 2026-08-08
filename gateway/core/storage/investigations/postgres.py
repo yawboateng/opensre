@@ -5,7 +5,8 @@ claim and run the same queued investigation. Here the queue is a table and
 ``claim_next_queued`` takes the row with ``FOR UPDATE SKIP LOCKED``, so exactly
 one worker gets it.
 
-Selected when ``DATABASE_URL`` is set; requires the ``postgresql`` extra.
+Selected when ``DATABASE_URI`` (or ``DATABASE_URL``) is set; requires the
+``postgresql`` extra.
 """
 
 from __future__ import annotations

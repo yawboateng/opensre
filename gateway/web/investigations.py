@@ -1,12 +1,12 @@
 """Async investigation API — enqueue now, poll later (ALB-safe).
 
-Store selection: Postgres when ``DATABASE_URL`` is set, else process-local
-memory. Do not widen the public response shape without a schema bump.
+Store selection: Postgres when ``DATABASE_URI`` (or ``DATABASE_URL``) is set,
+else process-local memory. Do not widen the public response shape without a
+schema bump.
 """
 
 from __future__ import annotations
 
-import os
 import threading
 from typing import Any
 
@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from config.constants.datastore import database_dsn
 from gateway.core.runtime.security_audit import audit_security_action
 from gateway.core.storage.investigations.store import (
     InMemoryInvestigationStore,
@@ -34,7 +35,7 @@ def _store() -> InvestigationStore:
     global _store_instance
     with _store_lock:
         if _store_instance is None:
-            dsn = os.getenv("DATABASE_URL", "").strip()
+            dsn = database_dsn()
             if dsn:
                 from gateway.core.storage.investigations.postgres import (
                     PostgresInvestigationStore,
