@@ -799,3 +799,48 @@ def test_search_pods_lists_all_namespaces_and_reports_its_continue_token() -> No
     assert result["truncated"] is True
     core.list_pod_for_all_namespaces.assert_called_once()
     core.list_namespaced_pod.assert_not_called()
+
+
+# --- registry wiring -------------------------------------------------------
+#
+# ``run()`` is reachable from a test with any kwargs you like. Production never
+# calls it that way: ``core/execution.py`` asks the tool which sources it needs
+# (``is_available``) and what to inject (``extract_params``). ``BaseTool``
+# defaults both to "always available, inject nothing", so a tool that forgets
+# to override them looks perfect under direct-call tests and cannot work once
+# registered. Both tests below fail if either override is deleted.
+
+
+def test_the_tool_is_hidden_when_no_kubeconfig_is_configured() -> None:
+    tool = KubernetesSearchFleetTool()
+
+    assert tool.is_available({"kubernetes": {"kubeconfig": _MINIMAL_KUBECONFIG}}) is True
+    assert tool.is_available({"kubernetes": {"kubeconfig_path": "/tmp/kubeconfig"}}) is True
+    assert tool.is_available({"kubernetes": {}}) is False
+    assert tool.is_available({}) is False
+
+
+def test_the_connection_fields_it_declares_as_injected_are_the_ones_it_extracts() -> None:
+    """Every name in ``injected_params`` has to be produced by ``extract_params``.
+
+    A missing key is silently replaced by the ``run`` signature default — an
+    empty kubeconfig — so the tool answers "kubernetes is not configured" on a
+    cluster it can actually reach.
+    """
+    tool = KubernetesSearchFleetTool()
+
+    extracted = tool.extract_params(
+        {
+            "kubernetes": {
+                "kubeconfig": _MINIMAL_KUBECONFIG,
+                "context": "prod",
+                "namespace": "payments",
+            }
+        }
+    )
+
+    assert set(tool.injected_params) <= set(extracted)
+    assert extracted["kubeconfig"] == _MINIMAL_KUBECONFIG
+    assert extracted["context"] == "prod"
+    assert extracted["default_namespace"] == "payments"
+    assert isinstance(extracted["cluster_configs"], dict)

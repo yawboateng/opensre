@@ -14,6 +14,7 @@ from integrations.kubernetes.tools import (
     _CLUSTER_PROP,
     _CLUSTER_SCOPED_PROPS,
     _UNAVAILABLE_MSG,
+    _base_params,
     _is_available,
     _resolve_client,
 )
@@ -155,7 +156,7 @@ class KubernetesSearchFleetTool(BaseTool):
         "kubernetes_list_pods or kubernetes_get_pod_logs on the cluster it returned.",
     ]
     surfaces = ("investigation", "chat", "action")
-    requires = []
+    requires = ["kubeconfig"]
     injected_params = [
         "kubeconfig",
         "kubeconfig_path",
@@ -212,6 +213,27 @@ class KubernetesSearchFleetTool(BaseTool):
         "unavailable_kinds": "[{cluster, kind, reason}] for kinds a cluster does not serve",
         "pods_searched": "Whether individual pods were searched as well as their owners",
     }
+
+    def is_available(self, sources: dict[str, Any]) -> bool:
+        """Hide the tool unless a kubeconfig is actually configured.
+
+        ``BaseTool`` defaults to always-available. Without this override the
+        tool is advertised on the chat and action surfaces of a deployment with
+        no Kubernetes at all, where every call can only return
+        ``tool_unavailable``.
+        """
+        return _is_available(sources)
+
+    def extract_params(self, sources: dict[str, Any]) -> dict[str, Any]:
+        """Supply the connection fields listed in ``injected_params``.
+
+        ``core/execution.py`` builds the injected kwargs from this method alone.
+        ``BaseTool`` returns ``{}``, so without this override ``kubeconfig``,
+        ``context`` and ``cluster_configs`` never reach ``run`` — the tool falls
+        through its own availability guard on every invocation and the fan-out
+        has no clusters to search.
+        """
+        return _base_params(sources)
 
     def run(
         self,
