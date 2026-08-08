@@ -16,6 +16,15 @@ def kubernetes_gather_prompt_fragment() -> str:
         "cluster is healthy or that a workload is absent — a workload may be an "
         "Argo Rollout; use kubernetes_list_workloads for 'does X exist / is it "
         "healthy'. Say which cluster and namespace were checked."
+        "A cloud project named in an alert is a monitoring scope, not a runtime "
+        "location: logs, metrics and Error Reporting may live in a dedicated "
+        "observability project or beside the workload — it varies, so check "
+        "both. When unsure which project holds the signal, sweep with "
+        "project='*' where the tool accepts it, and otherwise query the "
+        "observability project directly. If you still cannot place a workload, "
+        "call kubernetes_search_fleet before saying it does not exist. An "
+        "unavailable tool is a missing capability, never a missing connection "
+        "or credential."
     )
 
 
