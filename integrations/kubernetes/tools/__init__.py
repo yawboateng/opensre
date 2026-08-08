@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from config.constants import DEFAULT_KUBERNETES_NAMESPACE
 from core.tool_framework.base import BaseTool
 from core.tool_framework.utils.tool_availability import tool_unavailable
-from config.constants import DEFAULT_KUBERNETES_NAMESPACE
 from integrations import selectors
 from integrations.config_models import KubernetesIntegrationConfig
 from integrations.kubernetes.client import _RESOURCE_DISPATCH, KubernetesClient
@@ -143,16 +143,23 @@ def _resolve_client(
     return client, conn, None
 
 
-def _effective_namespace(requested: str, conn: dict[str, Any]) -> str:
+def _effective_namespace(requested: str, conn: dict[str, Any], cluster_targeted: bool = False) -> str:
     """Resolve the effective namespace for a request.
 
-    The effective namespace is the model's explicit ``namespace`` argument if it
-    is a non-empty string; otherwise the ``namespace`` recorded on the resolved
-    cluster's connection config; otherwise ``"default"``.
+    When targeting the default cluster (cluster_targeted=False):
+    - Use the model's explicit namespace if provided
+    - Otherwise use the default instance's configured namespace
+    - Otherwise use "default"
 
-    ``conn`` is the resolved cluster's config so a named cluster's namespace is
-    never shadowed by the default instance's.
+    When targeting a specific cluster (cluster_targeted=True):
+    - Use the target cluster's configured namespace
+    - Otherwise use "default"
+
+    This ensures that when switching to a different cluster, you get that
+    cluster's configured namespace rather than the default instance's namespace.
     """
+    if cluster_targeted:
+        return conn.get("namespace") or DEFAULT_KUBERNETES_NAMESPACE
     if requested.strip():
         return requested.strip()
     return conn.get("namespace") or DEFAULT_KUBERNETES_NAMESPACE
@@ -214,7 +221,13 @@ class KubernetesListPodsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = ["kubeconfig"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -268,7 +281,7 @@ class KubernetesListPodsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, pods=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_pods(
                 namespace=namespace, label_selector=label_selector, limit=limit
@@ -310,7 +323,13 @@ class KubernetesGetPodLogsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = ["pod_name"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -376,7 +395,7 @@ class KubernetesGetPodLogsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, lines=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.get_pod_logs(
                 namespace=namespace, pod_name=pod_name, container=container, tail_lines=tail_lines
@@ -415,7 +434,13 @@ class KubernetesListDeploymentsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -465,7 +490,7 @@ class KubernetesListDeploymentsTool(BaseTool):
             return tool_unavailable(
                 "kubernetes", error or _UNAVAILABLE_MSG, deployments=[], total=0
             )
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_deployments(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -502,7 +527,13 @@ class KubernetesGetEventsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -559,7 +590,7 @@ class KubernetesGetEventsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, events=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.get_events(
                 namespace=namespace, field_selector=field_selector, limit=limit
@@ -608,7 +639,13 @@ class KubernetesDescribePodTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = ["pod_name"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -652,7 +689,7 @@ class KubernetesDescribePodTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, spec={}, status={})
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.describe_pod(namespace=namespace, pod_name=pod_name)
             if not result.get("success"):
@@ -768,7 +805,13 @@ class KubernetesListServicesTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -822,7 +865,7 @@ class KubernetesListServicesTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, services=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_services(
                 namespace=namespace, label_selector=label_selector, limit=limit
@@ -859,7 +902,13 @@ class KubernetesListStatefulSetsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -909,7 +958,7 @@ class KubernetesListStatefulSetsTool(BaseTool):
             return tool_unavailable(
                 "kubernetes", error or _UNAVAILABLE_MSG, statefulsets=[], total=0
             )
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_statefulsets(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -945,7 +994,13 @@ class KubernetesListDaemonSetsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -993,7 +1048,7 @@ class KubernetesListDaemonSetsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, daemonsets=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_daemonsets(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1030,7 +1085,13 @@ class KubernetesListIngressesTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -1078,7 +1139,7 @@ class KubernetesListIngressesTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, ingresses=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_ingresses(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1114,7 +1175,13 @@ class KubernetesListConfigMapsTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = []
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -1162,7 +1229,7 @@ class KubernetesListConfigMapsTool(BaseTool):
         )
         if client is None:
             return tool_unavailable("kubernetes", error or _UNAVAILABLE_MSG, configmaps=[], total=0)
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.list_configmaps(namespace=namespace, limit=limit)
             if not result.get("success"):
@@ -1212,7 +1279,13 @@ class KubernetesGetResourceTool(BaseTool):
     ]
     surfaces = ("investigation", "chat")
     requires = ["resource_type", "name"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -1272,7 +1345,7 @@ class KubernetesGetResourceTool(BaseTool):
                 resource_type=resource_type,
                 name=name,
             )
-        namespace = _effective_namespace(namespace, conn)
+        namespace = _effective_namespace(namespace, conn, cluster_targeted=bool(cluster.strip()))
         with client:
             result = client.get_resource(
                 resource_type=resource_type, name=name, namespace=namespace
@@ -1361,7 +1434,7 @@ class KubernetesListNamespacesTool(BaseTool):
     use_cases = [
         "Discovering where a named service runs",
         "Confirming an environment namespace exists before scoping a query",
-        "Checking whether an empty pod list means \"healthy\" or \"wrong namespace\"",
+        'Checking whether an empty pod list means "healthy" or "wrong namespace"',
     ]
     anti_examples = [
         "Listing pods — use kubernetes_list_pods",
@@ -1369,7 +1442,13 @@ class KubernetesListNamespacesTool(BaseTool):
     ]
     surfaces = ("investigation", "chat", "action")
     requires = ["kubeconfig"]
-    injected_params = ["kubeconfig", "kubeconfig_path", "context", "default_namespace", "cluster_configs"]
+    injected_params = [
+        "kubeconfig",
+        "kubeconfig_path",
+        "context",
+        "default_namespace",
+        "cluster_configs",
+    ]
     input_schema = {
         "type": "object",
         "properties": {
@@ -1441,8 +1520,11 @@ class KubernetesListNamespacesTool(BaseTool):
                         ),
                     }
                 return tool_unavailable(
-                    "kubernetes", result.get("error", "unknown error"),
-                    namespaces=[], total=0, listable=False
+                    "kubernetes",
+                    result.get("error", "unknown error"),
+                    namespaces=[],
+                    total=0,
+                    listable=False,
                 )
             return {
                 "source": "kubernetes",
