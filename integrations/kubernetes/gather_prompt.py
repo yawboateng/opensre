@@ -13,8 +13,9 @@ def kubernetes_gather_prompt_fragment() -> str:
         "not and the cluster is unfamiliar, call kubernetes_list_namespaces before "
         "concluding nothing is wrong. "
         "An empty pod/deployment list from one namespace is not evidence that a "
-        "cluster is healthy — it is evidence that namespace is empty. Say which "
-        "cluster and namespace were checked."
+        "cluster is healthy or that a workload is absent — a workload may be an "
+        "Argo Rollout; use kubernetes_list_workloads for 'does X exist / is it "
+        "healthy'. Say which cluster and namespace were checked."
     )
 
 

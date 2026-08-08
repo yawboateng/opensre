@@ -50,9 +50,10 @@ A successful verification confirms the configured namespace is readable.
 
 | Tool | What it does | Chat |
 |---|---|---|
+| `kubernetes_list_workloads` | List every workload kind in a namespace: Deployments, StatefulSets, DaemonSets, CronJobs, and Argo Rollouts | ✓ |
 | `kubernetes_list_pods` | List pods in a namespace with phase, readiness, and restart counts | ✓ |
 | `kubernetes_get_pod_logs` | Fetch recent log lines from a pod container | ✓ |
-| `kubernetes_list_deployments` | List deployments with desired/ready/available replica counts | ✓ |
+| `kubernetes_list_deployments` | List deployments with desired/ready/available replica counts |  |
 | `kubernetes_get_events` | List cluster events — crash loops, OOM kills, scheduling failures | ✓ |
 | `kubernetes_describe_pod` | Fetch full spec, status, and container states for a single pod | ✓ |
 | `kubernetes_list_namespaces` | List namespaces in the cluster | ✓ |
@@ -60,9 +61,10 @@ A successful verification confirms the configured namespace is readable.
 | `kubernetes_list_services` | List services with their type, clusterIP, ports, and selector | ✓ |
 | `kubernetes_list_statefulsets` | List StatefulSets with desired/ready/current/updated replica counts |  |
 | `kubernetes_list_daemonsets` | List DaemonSets with desired/current/ready/available counts |  |
+| `kubernetes_list_rollouts` | List Argo Rollouts with strategy, phase, step, pause state, and revisions |  |
 | `kubernetes_list_ingresses` | List Ingress resources with routing rules, host→service path mappings, and TLS config |  |
 | `kubernetes_list_configmaps` | List ConfigMaps with their key-value data |  |
-| `kubernetes_get_resource` | Fetch a single named resource by type and name (pods, deployments, statefulsets, daemonsets, services, ingresses, configmaps, replicasets, pvcs, nodes) |  |
+| `kubernetes_get_resource` | Fetch a single named resource by type and name (pods, deployments, statefulsets, daemonsets, services, ingresses, configmaps, replicasets, pvcs, nodes, rollouts) |  |
 | `kubernetes_list_clusters` | List the registered clusters you can target by name (for multi-cluster setups) | ✓ |
 
 ## Targeting multiple clusters
@@ -131,6 +133,12 @@ each one.
 ### Namespace targeting
 
 The effective namespace is the namespace in your request if you name one; otherwise the cluster's configured default namespace; otherwise `default`. Use `kubernetes_list_namespaces` to discover the options when the cluster is unfamiliar.
+
+### Argo Rollouts
+
+On clusters running Argo Rollouts, the real workload may be a Rollout rather than a Deployment. `kubernetes_list_deployments` returns nothing for such services, while `kubernetes_list_workloads` covers every workload kind and reports which kinds it could not read.
+
+On clusters without Argo, Rollouts are reported as unavailable while everything else works normally.
 
 ### Registering every GKE cluster at once
 
@@ -233,6 +241,14 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list"]
+  # Only on clusters running Argo Rollouts; omit it and Rollouts are reported
+  # as unreadable while every other kind still works.
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list"]
 ```
 
-On GKE, an identity with `roles/viewer` or `roles/container.viewer` can already list namespaces via the IAM authorizer, with no RBAC object needed. If instead the credential authenticates via RBAC only and lacks a cluster-wide binding, `kubernetes_list_namespaces` reports that it cannot enumerate and every other tool still works.
+On GKE, an identity with `roles/viewer` or `roles/container.viewer` can already list namespaces via the IAM authorizer, with no RBAC object needed. If instead the credential authenticates via RBAC only and lacks a cluster-wide binding, `kubernetes_list_namespaces` reports that it cannot enumerate and every other tool still works. A missing `argoproj.io` grant degrades Rollouts only.

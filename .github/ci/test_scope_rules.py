@@ -232,6 +232,16 @@ RULES: tuple[PathRule, ...] = (
         ),
     ),
     PathRule(
+        "integrations/kubernetes/",
+        (
+            "tests/integrations/kubernetes/",
+            "tests/tools/test_kubernetes_tools.py",
+            "tests/tools/test_infra_tools_on_action_surface.py",
+            "tests/tools/test_telemetry.py",
+            "tests/tools/test_registry_index.py",
+        ),
+    ),
+    PathRule(
         "integrations/kafka/",
         (
             "tests/integrations/test_kafka.py",
