@@ -19,6 +19,11 @@ from http import HTTPStatus
 from typing import Any
 
 from integrations.github.client import GitHubApiError, GitHubRestClient
+from integrations.github.path_safety import (
+    invalid_branch_reason,
+    repo_path,
+    safe_git_ref,
+)
 from integrations.github.write_errors import GitHubWriteError
 
 ERR_INVALID_BRANCH = "invalid_branch_name"
@@ -30,10 +35,6 @@ ERR_COMMIT_FAILED = "commit_failed"
 # Regular, non-executable file. The Git Data API wants a mode on every tree
 # entry; this path never creates symlinks, submodules, or executables.
 _BLOB_MODE = "100644"
-
-# Characters git forbids anywhere in a ref name. Rejecting them here turns a
-# confusing 422 from the tree/ref call into one sentence naming the branch.
-_FORBIDDEN_BRANCH_CHARS = frozenset(" ~^:?*[\\\x7f")
 
 
 @dataclass(frozen=True)
@@ -51,21 +52,6 @@ class FileChange:
 
 class GitHubBranchError(GitHubWriteError):
     """Expected branch-creation failure with a stable ``kind``."""
-
-
-def _invalid_branch_reason(branch: str) -> str | None:
-    """Return why *branch* is not a usable ref name, or ``None`` when it is."""
-    if not branch:
-        return "branch name is empty"
-    if any(char in _FORBIDDEN_BRANCH_CHARS or char < " " for char in branch):
-        return "branch name contains a character git forbids in a ref"
-    if branch.startswith("/") or branch.endswith("/") or "//" in branch:
-        return "branch name has an empty path segment"
-    if ".." in branch or "@{" in branch:
-        return "branch name contains '..' or '@{'"
-    if branch.endswith(".") or branch.endswith(".lock") or branch == "@":
-        return "branch name ends with '.' or '.lock', or is '@'"
-    return None
 
 
 def _tree_entry(change: FileChange) -> dict[str, Any]:
@@ -109,8 +95,13 @@ def _validate_changes(changes: list[FileChange]) -> None:
 
 def branch_exists(client: GitHubRestClient, *, owner: str, repo: str, branch: str) -> bool:
     """Return True when ``refs/heads/<branch>`` already exists in the repo."""
+    safe_branch = safe_git_ref(branch)
+    if safe_branch is None:
+        raise GitHubBranchError(ERR_INVALID_BRANCH, f"Invalid branch name: {branch}")
+    # The ref is appended, not passed through repo_path: ``git/ref/<ref>`` takes
+    # a multi-segment ref, so a branch like ``feat/foo`` must keep its ``/``.
     try:
-        client.request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
+        client.request("GET", f"{repo_path(owner, repo, 'git', 'ref')}/heads/{safe_branch}")
     except GitHubApiError as exc:
         if exc.status_code == HTTPStatus.NOT_FOUND:
             return False
@@ -122,8 +113,13 @@ def _base_commit(
     client: GitHubRestClient, *, owner: str, repo: str, base_branch: str
 ) -> tuple[str, str]:
     """Return ``(commit_sha, tree_sha)`` for the tip of *base_branch*."""
+    safe_base_branch = safe_git_ref(base_branch)
+    if safe_base_branch is None:
+        raise GitHubBranchError(ERR_BASE_BRANCH, f"Invalid base branch name: {base_branch}")
     try:
-        ref = client.request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{base_branch}")
+        ref = client.request(
+            "GET", f"{repo_path(owner, repo, 'git', 'ref')}/heads/{safe_base_branch}"
+        )
     except GitHubApiError as exc:
         if exc.status_code == HTTPStatus.NOT_FOUND:
             raise GitHubBranchError(
@@ -140,7 +136,7 @@ def _base_commit(
             ERR_BASE_BRANCH, f"Base branch '{base_branch}' does not point at a commit."
         )
     try:
-        commit = client.request("GET", f"/repos/{owner}/{repo}/git/commits/{commit_sha}")
+        commit = client.request("GET", repo_path(owner, repo, "git", "commits", commit_sha))
     except GitHubApiError as exc:
         raise GitHubBranchError(
             ERR_COMMIT_FAILED, f"Could not read the tip commit of '{base_branch}': {exc}"
@@ -170,7 +166,7 @@ def create_branch_with_changes(
     branch name is unusable, the base branch is missing, the new branch already
     exists, the change set is empty or malformed, or GitHub rejects the write.
     """
-    invalid = _invalid_branch_reason(new_branch)
+    invalid = invalid_branch_reason(new_branch)
     if invalid is not None:
         raise GitHubBranchError(ERR_INVALID_BRANCH, f"Cannot create branch: {invalid}.")
     if new_branch == base_branch:
@@ -196,7 +192,7 @@ def create_branch_with_changes(
         tree = _as_dict(
             client.request(
                 "POST",
-                f"/repos/{owner}/{repo}/git/trees",
+                repo_path(owner, repo, "git", "trees"),
                 body={
                     "base_tree": base_tree_sha,
                     "tree": [_tree_entry(change) for change in changes],
@@ -207,7 +203,7 @@ def create_branch_with_changes(
         commit = _as_dict(
             client.request(
                 "POST",
-                f"/repos/{owner}/{repo}/git/commits",
+                repo_path(owner, repo, "git", "commits"),
                 body={
                     "message": commit_message,
                     "tree": tree.get("sha"),
@@ -221,7 +217,9 @@ def create_branch_with_changes(
             raise GitHubBranchError(ERR_COMMIT_FAILED, "GitHub did not return a commit sha.")
         client.request(
             "POST",
-            f"/repos/{owner}/{repo}/git/refs",
+            repo_path(owner, repo, "git", "refs"),
+            # RAW on purpose: this is a JSON body, not a path. Percent-encoding
+            # it would create a branch literally named ``feat%2Ffoo``.
             body={"ref": f"refs/heads/{new_branch}", "sha": commit_sha},
         )
     except GitHubApiError as exc:
