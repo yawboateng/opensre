@@ -1670,8 +1670,10 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "kubernetes_list_namespaces",
         "kubernetes_list_nodes",
         "kubernetes_list_pods",
+        "kubernetes_list_rollouts",
         "kubernetes_list_services",
         "kubernetes_list_statefulsets",
+        "kubernetes_list_workloads",
     }
 )
 
