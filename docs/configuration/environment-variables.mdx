@@ -152,6 +152,25 @@ raised. Each reason is logged, so the level is usually the difference between
 An unrecognized value falls back to `INFO` rather than stopping the process, so
 a typo here can never keep a gateway from starting.
 
+## Time
+
+| Variable | Default | Description | Module |
+|----------|---------|-------------|--------|
+| `OPENSRE_DISPLAY_TIMEZONE` | host timezone | IANA name of the zone the agent quotes times in, e.g. `America/New_York` | `config/constants/timezone` |
+
+Set this on a chat gateway. Unset, the agent reports times in its host's zone —
+on a pod that is wherever the cluster happens to run, and rarely where anyone
+reading the answer sits, so every timestamp costs the reader a conversion before
+it can be lined up against an alert.
+
+With it set, the agent quotes the current time in that zone and labels it, and
+converts timestamps it reads out of logs, alerts, and incidents into the same
+zone while keeping the original in parentheses so you can check the arithmetic.
+
+This changes what the agent *says*, not the process clock, not stored data, and
+not what any tool sends to a vendor API. A zone name it cannot load falls back
+to the host zone rather than stopping the process.
+
 ## Agent Identity
 
 | Variable | Default | Description | Module |
