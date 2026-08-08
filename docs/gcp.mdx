@@ -155,12 +155,30 @@ Runs a [Cloud Logging filter](https://cloud.google.com/logging/docs/view/logging
 
 The message is read from whichever payload field the producer used — `textPayload` for GKE stdout, `jsonPayload` for structured logs, `protoPayload` for Cloud Audit Logs — so audit entries are not returned blank.
 
+`project="*"` is one request, not one per project: Cloud Logging accepts up to
+100 `resourceNames` per call, so a sweep of a dozen projects costs the same
+round trip as querying one. Use it whenever you do not know which project holds
+the logs — omitting `project` reads only the default, which on a split estate is
+usually not the one you want.
+
+This is also how you locate a GKE workload you cannot place. Entries from GKE
+carry `cluster_name` and `namespace_name` labels, so a single sweep answers
+"which cluster and namespace is this running in?" even when the alert only named
+a centralised observability project.
+
 ### `gcp_monitoring_query`
 
-Reads Cloud Monitoring time series for **one** project per call (unlike logging, the Monitoring API is scoped to a single project).
+Reads Cloud Monitoring time series for **one metrics scope** per call. A scope is
+a project id, but it is not a data boundary: a scoping project returns series
+for **every project it monitors**. So when metrics are centralised, query the
+observability project and read `resource_labels.project_id` on each series to
+see which project it actually came from.
+
+The one-scope-per-call limit is about the request shape, not about reach —
+unlike `gcp_logging_query` this takes no list and no `*`.
 
 - **`filter`** — must name a metric type, e.g. `metric.type="kubernetes.io/container/memory/used_bytes"`
-- **`project`** — a single project id
+- **`project`** — a single project id, treated as a metrics scope
 - **`hours`** — lookback window, default `1`
 - **`alignment_period_seconds`** — downsampling bucket, default `300`
 - **`aligner`** — optional override, e.g. `ALIGN_MAX`
